@@ -51,10 +51,13 @@ export default function TestingPage() {
   const [freeText, setFreeText] = useState(() => getInitialState('freeText', ''));
 
   // ElevenLabs generation parameters
-  const [bpm, setBpm] = useState(() => getInitialState('bpm', 90));
-  const [bars, setBars] = useState(() => getInitialState('bars', 8));
-  const [musicalKey, setMusicalKey] = useState(() => getInitialState('musicalKey', ''));
+  const [bpm, setBpm] = useState(() => getInitialState('bpm', ''));       // '' = auto
+  const [bars, setBars] = useState(() => getInitialState('bars', 4));
+  const [musicalKey, setMusicalKey] = useState(() => getInitialState('musicalKey', 'auto'));  // 'auto' = LLM decides
   const [outputFormat, setOutputFormat] = useState(() => getInitialState('outputFormat', 'pcm_44100'));
+
+  // Variations from parallel generation
+  const [variations, setVariations] = useState(() => getInitialState('variations', []));
 
   // Generation metadata from response
   const [generationMeta, setGenerationMeta] = useState(() => getInitialState('generationMeta', null));
@@ -85,6 +88,7 @@ export default function TestingPage() {
       'testingPage_freeText',
       'testingPage_freeTextMetadata',
       'testingPage_generationMeta',
+      'testingPage_variations',
     ].forEach((key) => sessionStorage.removeItem(key));
 
     setStatus('');
@@ -105,6 +109,7 @@ export default function TestingPage() {
     setDifficultyError(false);
     setFreeTextError(false);
     setGenerationMeta(null);
+    setVariations([]);
     if (noteFileInputRef.current) {
       noteFileInputRef.current.value = '';
     }
@@ -166,6 +171,10 @@ export default function TestingPage() {
   useEffect(() => {
     sessionStorage.setItem('testingPage_notes', JSON.stringify(notes));
   }, [notes]);
+
+  useEffect(() => {
+    sessionStorage.setItem('testingPage_variations', JSON.stringify(variations));
+  }, [variations]);
 
   useEffect(() => {
     sessionStorage.setItem('testingPage_generationMeta', JSON.stringify(generationMeta));
@@ -261,6 +270,7 @@ export default function TestingPage() {
       setAudioUrl('');
       setScores({ audio_quality_score: null, llm_accuracy_score: null });
       setGenerationMeta(null);
+      setVariations([]);
       resetNotesAndAttachments();
       setNotesPanelOpen(false);
       setStatus('');
@@ -287,6 +297,7 @@ export default function TestingPage() {
       setAudioUrl('');
       setScores({ audio_quality_score: null, llm_accuracy_score: null });
       setGenerationMeta(null);
+      setVariations([]);
       resetNotesAndAttachments();
       setNotesPanelOpen(false);
       setStatus('');
@@ -321,12 +332,13 @@ export default function TestingPage() {
         ? { text: freeText }
         : { prompt_id: currentPrompt.id };
 
-      payload.bpm = bpm;
+      payload.bpm = bpm === '' ? null : parseInt(bpm);   // null = auto
       payload.bars = bars;
       payload.output_format = outputFormat;
-      if (musicalKey) {
+      if (musicalKey && musicalKey !== 'auto') {
         payload.key = musicalKey;
       }
+      // key omitted (null) when 'auto' — LLM decides
 
       const { data } = await api.post('/api/test/send-prompt', payload);
       setLlmJson(data.composition_plan);
@@ -334,6 +346,10 @@ export default function TestingPage() {
       setAudioUrl(data.audio_url ? `${API_BASE_URL}${data.audio_url}` : '');
       setAudioId(data.audio_id || '');
       setAudioFilePath(data.audio_url || '');
+      setVariations((data.variations || []).map(v => ({
+        audio_id: v.audio_id,
+        audio_url: `${API_BASE_URL}${v.audio_url}`,
+      })));
       setNoteAttachments([]);
       setNoteAudioFile(null);
       setNoteAudioPath('');
@@ -345,7 +361,8 @@ export default function TestingPage() {
         api_time_ms: data.api_time_ms,
       });
 
-      setStatus(`Generated in ${(data.api_time_ms / 1000).toFixed(1)}s | ${data.duration_ms}ms @ ${data.bpm} BPM`);
+      const keyLabel = data.key || 'No key';
+      setStatus(`Generated in ${(data.api_time_ms / 1000).toFixed(1)}s | ${data.duration_ms}ms @ ${data.bpm} BPM | ${keyLabel}`);
 
       setDifficultyError(false);
       setFreeTextError(false);
@@ -477,6 +494,7 @@ export default function TestingPage() {
         setFreeText('');
         setFreeTextMetadata({ difficulty: null });
         setGenerationMeta(null);
+        setVariations([]);
         setSubmitting(false);
       }
     } catch (err) {
@@ -546,6 +564,7 @@ export default function TestingPage() {
         setFreeText('');
         setFreeTextMetadata({ difficulty: null });
         setGenerationMeta(null);
+        setVariations([]);
         setSubmitting(false);
       }
     } catch (err) {
@@ -561,6 +580,7 @@ export default function TestingPage() {
     setLlmResponse(null);
     setAudioUrl('');
     setGenerationMeta(null);
+    setVariations([]);
     setStatus('');
   };
 
@@ -654,11 +674,20 @@ export default function TestingPage() {
           <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
             <label className="label" style={{ margin: 0, fontSize: '14px', whiteSpace: 'nowrap' }}>BPM:</label>
             <input
-              type="number"
+              type="text"
               value={bpm}
-              onChange={(e) => setBpm(Math.max(40, Math.min(300, parseInt(e.target.value) || 90)))}
-              min={40}
-              max={300}
+              onChange={(e) => {
+                const val = e.target.value;
+                if (val === '') {
+                  setBpm('');
+                } else {
+                  const num = parseInt(val);
+                  if (!isNaN(num)) {
+                    setBpm(Math.max(40, Math.min(300, num)));
+                  }
+                }
+              }}
+              placeholder="Auto"
               className="input"
               style={{ width: '80px', textAlign: 'center' }}
             />
@@ -672,9 +701,9 @@ export default function TestingPage() {
               className="input"
               style={{ width: '70px', cursor: 'pointer' }}
             >
+              <option value={2}>2</option>
               <option value={4}>4</option>
               <option value={8}>8</option>
-              <option value={16}>16</option>
             </select>
           </div>
 
@@ -686,6 +715,7 @@ export default function TestingPage() {
               className="input"
               style={{ width: '140px', cursor: 'pointer' }}
             >
+              <option value="auto">Auto</option>
               <option value="">None</option>
               <option value="C major">C major</option>
               <option value="C minor">C minor</option>
@@ -1246,12 +1276,25 @@ export default function TestingPage() {
           ) : (
             <>
               <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '20px', maxWidth: '900px', margin: '0 auto' }}>
-                {/* Audio Player */}
+                {/* Audio Variations */}
                 <div className="card" style={{ zIndex: 1, padding: '16px' }}>
                   <h3 className="label" style={{ fontSize: '16px', marginBottom: '10px', zIndex: 1 }}>
                     Generated Audio
                   </h3>
-                  <AudioPlayer src={audioUrl} />
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                    {variations.length > 1 ? (
+                      variations.map((v, idx) => (
+                        <div key={v.audio_id}>
+                          <div style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '6px' }}>
+                            Variation {idx + 1}
+                          </div>
+                          <AudioPlayer src={v.audio_url} />
+                        </div>
+                      ))
+                    ) : (
+                      <AudioPlayer src={audioUrl} />
+                    )}
+                  </div>
                 </div>
 
                 {/* Scoring */}
