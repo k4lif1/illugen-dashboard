@@ -1,0 +1,19 @@
+#!/bin/bash
+# Prevent committing directly to main branch
+
+CURRENT_BRANCH=$(git rev-parse --abbrev-ref HEAD)
+
+if [ "$CURRENT_BRANCH" = "main" ]; then
+    echo "❌ ERROR: You cannot commit directly to the main branch!"
+    echo ""
+    echo "Please switch to the dev branch first:"
+    echo "  git checkout dev"
+    echo ""
+    echo "Or create a new branch:"
+    echo "  git checkout -b your-feature-branch"
+    echo ""
+    exit 1
+fi
+
+exit 0
+

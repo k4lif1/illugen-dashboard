@@ -1,0 +1,49 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+.env
+venv/
+env/
+ENV/
+
+# Database - DO NOT COMMIT! Keep local only
+*.db
+*.db-*
+*.db.backup*
+drumgen.db
+database_backups/
+
+# Audio files (generated samples) - DO NOT COMMIT! Keep local only
+audio_files/
+illugen_audio/
+note_attachments/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo 
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node
+node_modules/
+dist/
+.cache/
+
+# Logs
+*.log
+
+# Database backups (kept locally only, not in git)
+database_backups/
+backups/
+
+# Test outputs
+test_outputs/
