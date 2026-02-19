@@ -14,7 +14,7 @@ logger = logging.getLogger(__name__)
 
 # Paths
 PROJECT_ROOT = Path(__file__).parent.parent
-DB_FILE = PROJECT_ROOT / "drumgen.db"
+DB_FILE = PROJECT_ROOT / "illugen.db"
 AUDIO_DIR = PROJECT_ROOT / "audio_files"
 ILLUGEN_AUDIO_DIR = PROJECT_ROOT / "illugen_audio"
 NOTE_ATTACHMENTS_DIR = PROJECT_ROOT / "note_attachments"
@@ -36,7 +36,7 @@ def create_backup():
         
         # 1. Backup database
         if DB_FILE.exists():
-            shutil.copy2(DB_FILE, backup_dir / "drumgen.db")
+            shutil.copy2(DB_FILE, backup_dir / "illugen.db")
             logger.info(f"✓ Database backed up: {DB_FILE.stat().st_size} bytes")
         else:
             logger.error(f"❌ Database not found: {DB_FILE}")

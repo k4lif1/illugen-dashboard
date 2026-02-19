@@ -5,7 +5,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 BACKUP_DIR="$PROJECT_ROOT/database_backups"
-DB_FILE="$PROJECT_ROOT/drumgen.db"
+DB_FILE="$PROJECT_ROOT/illugen.db"
 AUDIO_DIR="$PROJECT_ROOT/audio_files"
 ILLUGEN_DIR="$PROJECT_ROOT/illugen_audio"
 
@@ -15,7 +15,7 @@ mkdir -p "$BACKUP_DIR"
 # Create timestamp
 TIMESTAMP=$(date '+%Y-%m-%d_%H-%M-%S')
 BACKUP_PATH="$BACKUP_DIR/backup_${TIMESTAMP}"
-BACKUP_DB_FILE="$BACKUP_PATH/drumgen.db"
+BACKUP_DB_FILE="$BACKUP_PATH/illugen.db"
 BACKUP_AUDIO_DIR="$BACKUP_PATH/audio_files"
 BACKUP_ILLUGEN_DIR="$BACKUP_PATH/illugen_audio"
 

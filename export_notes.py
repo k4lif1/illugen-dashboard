@@ -7,7 +7,7 @@ import csv
 import sqlite3
 from pathlib import Path
 
-DB_PATH = Path(__file__).resolve().parent / "drumgen.db"
+DB_PATH = Path(__file__).resolve().parent / "illugen.db"
 OUTPUT_CSV = Path(__file__).resolve().parent / "exported_notes.csv"
 
 

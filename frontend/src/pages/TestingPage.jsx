@@ -1,8 +1,33 @@
-import React, { useState, useEffect, useRef } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import api, { API_BASE_URL } from '../services/api';
 import AudioPlayer from '../components/AudioPlayer';
 import ScoringSliders from '../components/ScoringSliders';
 import JsonViewer from '../components/JsonViewer';
+
+// ---------------------------------------------------------------------------
+// localStorage helpers for the bank system
+// ---------------------------------------------------------------------------
+const BANK_KEY = 'testingPage_bank';
+const BANK_INDEX_KEY = 'testingPage_bankIndex';
+
+function loadBank() {
+  try {
+    const raw = localStorage.getItem(BANK_KEY);
+    return raw ? JSON.parse(raw) : [];
+  } catch { return []; }
+}
+function saveBank(bank) {
+  localStorage.setItem(BANK_KEY, JSON.stringify(bank));
+}
+function loadBankIndex() {
+  try {
+    const raw = localStorage.getItem(BANK_INDEX_KEY);
+    return raw !== null ? JSON.parse(raw) : 0;
+  } catch { return 0; }
+}
+function saveBankIndex(idx) {
+  localStorage.setItem(BANK_INDEX_KEY, JSON.stringify(idx));
+}
 
 export default function TestingPage() {
   // Detect if this is a page refresh (reload) vs navigation
@@ -70,17 +95,18 @@ export default function TestingPage() {
   const [generationScoreError, setGenerationScoreError] = useState(false);
   const [llmScoreError, setLlmScoreError] = useState(false);
 
-  // Prompt queue — pre-fetched batch so the next prompt is always ready
-  const QUEUE_SIZE = 10;
-  const [promptQueue, setPromptQueue] = useState(() => getInitialState('promptQueue', []));
-  const promptQueueRef = useRef(promptQueue);
-  useEffect(() => { promptQueueRef.current = promptQueue; }, [promptQueue]);
+  // ── Bank system (replaces old queue/pregen) ──
+  const BATCH_SIZE = 10;
+  const [bank, setBank] = useState(loadBank);
+  const [bankIndex, setBankIndex] = useState(loadBankIndex);
+  const bankRef = useRef(bank);
+  const bankIndexRef = useRef(bankIndex);
+  const lastAppliedBankIndexRef = useRef(-1);
+  const batchGenIdRef = useRef(0); // increments each generateNewBatch — stale callbacks check this
 
-  // Pre-generation pipeline — generates audio for queued prompts in background
-  const pregenResults = useRef(new Map());
-  const pregenInFlight = useRef(new Set());
-  const [pregenReadyCount, setPregenReadyCount] = useState(0);
-  const [pregenTotal, setPregenTotal] = useState(0);
+  // Keep refs in sync
+  useEffect(() => { bankRef.current = bank; saveBank(bank); }, [bank]);
+  useEffect(() => { bankIndexRef.current = bankIndex; saveBankIndex(bankIndex); }, [bankIndex]);
 
   // User-set difficulty for auto-prompt mode (independent of prompt DB value)
   const [autoPromptDifficulty, setAutoPromptDifficulty] = useState(() => getInitialState('autoPromptDifficulty', null));
@@ -102,7 +128,6 @@ export default function TestingPage() {
       'testingPage_freeTextMetadata',
       'testingPage_generationMeta',
       'testingPage_variations',
-      'testingPage_promptQueue',
       'testingPage_autoPromptDifficulty',
     ].forEach((key) => sessionStorage.removeItem(key));
 
@@ -196,10 +221,6 @@ export default function TestingPage() {
   }, [generationMeta]);
 
   useEffect(() => {
-    sessionStorage.setItem('testingPage_promptQueue', JSON.stringify(promptQueue));
-  }, [promptQueue]);
-
-  useEffect(() => {
     sessionStorage.setItem('testingPage_autoPromptDifficulty', JSON.stringify(autoPromptDifficulty));
   }, [autoPromptDifficulty]);
 
@@ -217,8 +238,6 @@ export default function TestingPage() {
     sessionStorage.setItem('testingPage_noteAttachments', JSON.stringify(noteAttachments));
   }, [noteAttachments]);
 
-  // Track if we've loaded the initial prompt (only once per component lifecycle)
-  const hasLoadedInitialPrompt = useRef(false);
   // AbortController for cancelling in-flight generation when skipping
   const generationAbortRef = useRef(null);
 
@@ -281,71 +300,34 @@ export default function TestingPage() {
     }
   }, [currentPrompt?.id]);
 
-  // Fetch a batch of prompts for the queue, excluding IDs already in queue + current
-  const fetchBatch = async (currentQueue = [], currentId = null, count = QUEUE_SIZE) => {
-    const excludeIds = currentQueue.map(p => p.id);
-    if (currentId) excludeIds.push(currentId);
-    const needed = Math.max(0, count - currentQueue.length);
-    if (needed === 0) return currentQueue;
-    try {
-      const params = { count: needed };
-      if (excludeIds.length) params.exclude_ids = excludeIds.join(',');
-      const { data } = await api.get('/api/prompts/batch', { params });
-      return [...currentQueue, ...data];
-    } catch {
-      return currentQueue;
-    }
-  };
+  // ── Bank system helpers ──
 
-  // Pre-generate a single prompt and store result
-  const pregenOne = async (prompt, settings) => {
-    if (pregenResults.current.has(prompt.id) || pregenInFlight.current.has(prompt.id)) return;
-    pregenInFlight.current.add(prompt.id);
-    try {
-      // Derive logical settings from prompt text (auto-prompt mode)
-      const derived = getSettingsForPrompt(prompt.text);
-      const payload = { prompt_id: prompt.id, bars: derived.bars, output_format: settings.outputFormat };
-      payload.bpm = derived.bpm;
-      payload.key = derived.key;
-      const { data } = await api.post('/api/test/send-prompt', payload);
-      pregenResults.current.set(prompt.id, {
-        llmJson: data.composition_plan,
-        llmResponse: data.llm_response || null,
-        audioUrl: data.audio_url ? `${API_BASE_URL}${data.audio_url}` : '',
-        audioId: data.audio_id || '',
-        audioFilePath: data.audio_url || '',
-        variations: (data.variations || []).map(v => ({
-          audio_id: v.audio_id,
-          audio_url: `${API_BASE_URL}${v.audio_url}`,
-          original_audio_id: v.original_audio_id || null,
-          original_audio_url: v.original_audio_url ? `${API_BASE_URL}${v.original_audio_url}` : null,
-        })),
-        generationMeta: { bpm: data.bpm, bars: data.bars, key: data.key, duration_ms: data.duration_ms, api_time_ms: data.api_time_ms },
-      });
-      setPregenReadyCount(pregenResults.current.size);
-    } catch (err) {
-      console.error(`Pre-gen failed for prompt ${prompt.id}:`, err);
-    } finally {
-      pregenInFlight.current.delete(prompt.id);
-    }
-  };
+  // Build a result object from an API response
+  const buildResult = (data) => ({
+    llmJson: data.composition_plan,
+    llmResponse: data.llm_response || null,
+    audioUrl: data.audio_url ? `${API_BASE_URL}${data.audio_url}` : '',
+    audioId: data.audio_id || '',
+    audioFilePath: data.audio_url || '',
+    variations: (data.variations || []).map(v => ({
+      audio_id: v.audio_id,
+      audio_url: `${API_BASE_URL}${v.audio_url}`,
+      original_audio_id: v.original_audio_id || null,
+      original_audio_url: v.original_audio_url ? `${API_BASE_URL}${v.original_audio_url}` : null,
+    })),
+    generationMeta: {
+      bpm: data.bpm,
+      bars: data.bars,
+      key: data.key,
+      duration_ms: data.duration_ms,
+      api_time_ms: data.api_time_ms,
+      timing: data.timing || null,
+      round_trip_ms: null,
+    },
+  });
 
-  // Run pre-generation pipeline with limited concurrency
-  const startPregenPipeline = (prompts, settings) => {
-    setPregenTotal(prompts.length);
-    const queue = [...prompts];
-    const MAX_CONCURRENT = 2;
-    const worker = async () => {
-      while (queue.length > 0) {
-        const p = queue.shift();
-        if (p) await pregenOne(p, settings);
-      }
-    };
-    for (let i = 0; i < Math.min(MAX_CONCURRENT, prompts.length); i++) worker();
-  };
-
-  // Apply a pre-generated result to the current UI state
-  const applyPregenResult = (result) => {
+  // Apply a bank result to the UI
+  const applyBankResult = useCallback((result) => {
     setLlmJson(result.llmJson);
     setLlmResponse(result.llmResponse);
     setAudioUrl(result.audioUrl);
@@ -358,112 +340,235 @@ export default function TestingPage() {
     setNoteAudioPath('');
     const keyLabel = result.generationMeta.key || 'No key';
     setStatus(`Generated in ${(result.generationMeta.api_time_ms / 1000).toFixed(1)}s | ${result.generationMeta.duration_ms}ms @ ${result.generationMeta.bpm} BPM | ${keyLabel}`);
-  };
+  }, []);
 
-  // Pop the next prompt from the queue and refill in background
-  const advanceFromQueue = (queue) => {
-    if (queue.length === 0) return null;
-    const [next, ...rest] = queue;
-    setPromptQueue(rest);
-    setAutoPromptDifficulty(null);
-    setScores({ audio_quality_score: null, llm_accuracy_score: null });
-    setGenerationMeta(null);
-    setVariations([]);
-    resetNotesAndAttachments();
-    setNotesPanelOpen(false);
-    setStatus('');
+  // Fire a single pre-gen API call and update bank on completion
+  const firePregen = useCallback((prompt, idx, settings, genId) => {
+    // Random duration: 2, 4, or 8 bars
+    const randomBars = [2, 4, 8][Math.floor(Math.random() * 3)];
+    const payload = {
+      prompt_id: prompt.id,
+      bars: randomBars,
+      output_format: settings.outputFormat,
+      // bpm and key omitted = auto (LLM decides)
+    };
+    api.post('/api/test/send-prompt', payload)
+      .then(({ data }) => {
+        // Discard if a newer batch has been created
+        if (batchGenIdRef.current !== genId) return;
+        setBank(prev => {
+          const updated = [...prev];
+          if (updated[idx] && updated[idx].status === 'generating') {
+            updated[idx] = { ...updated[idx], result: buildResult(data), status: 'ready' };
+          }
+          return updated;
+        });
+      })
+      .catch(err => {
+        if (batchGenIdRef.current !== genId) return;
+        console.error(`Pre-gen failed for prompt ${prompt.id}:`, err);
+        setBank(prev => {
+          const updated = [...prev];
+          if (updated[idx] && updated[idx].status === 'generating') {
+            updated[idx] = { ...updated[idx], status: 'failed' };
+          }
+          return updated;
+        });
+      });
+  }, []);
 
-    // Check if pre-gen result is already available
-    const cached = pregenResults.current.get(next.id);
-    if (cached) {
-      // Apply cached result directly — no setTimeout to avoid race
-      pregenResults.current.delete(next.id);
-      setPregenReadyCount(pregenResults.current.size);
-      setCurrentPrompt(next);
-      setLlmJson(cached.llmJson);
-      setLlmResponse(cached.llmResponse);
-      setAudioUrl(cached.audioUrl);
-      setAudioId(cached.audioId);
-      setAudioFilePath(cached.audioFilePath);
-      setVariations(cached.variations);
-      setGenerationMeta(cached.generationMeta);
-      const keyLabel = cached.generationMeta.key || 'No key';
-      setStatus(`Generated in ${(cached.generationMeta.api_time_ms / 1000).toFixed(1)}s | ${cached.generationMeta.duration_ms}ms @ ${cached.generationMeta.bpm} BPM | ${keyLabel}`);
-    } else {
-      // No cached result yet — set prompt and clear results (will poll below)
-      setCurrentPrompt(next);
+  // Generate a new batch of prompts and fire all in parallel
+  const generateNewBatch = useCallback(async () => {
+    // Increment batch gen ID — any in-flight calls from previous batches will be discarded
+    const genId = ++batchGenIdRef.current;
+
+    setStatus('Loading prompts and pre-generating loops...');
+    try {
+      const { data: prompts } = await api.get('/api/prompts/batch', { params: { count: BATCH_SIZE } });
+      if (prompts.length === 0) {
+        setStatus('No prompts in the database.');
+        setCurrentPrompt(null);
+        return;
+      }
+
+      const newBank = prompts.map(p => ({
+        prompt: p,
+        result: null,
+        status: 'generating',
+      }));
+
+      setBank(newBank);
+      setBankIndex(0);
+      lastAppliedBankIndexRef.current = -1;
+
+      // Set current prompt to the first one
+      setCurrentPrompt(prompts[0]);
+      // Clear previous results
       setLlmJson(null);
       setLlmResponse(null);
       setAudioUrl('');
-      // If not even in-flight, kick off generation for this prompt
-      if (!pregenInFlight.current.has(next.id)) {
-        pregenOne(next, { outputFormat });
+      setAutoPromptDifficulty(null);
+      setScores({ audio_quality_score: null, llm_accuracy_score: null });
+      setGenerationMeta(null);
+      setVariations([]);
+      resetNotesAndAttachments();
+      setNotesPanelOpen(false);
+
+      // Fire ALL calls in parallel (no concurrency limit)
+      const currentFormat = sessionStorage.getItem('testingPage_outputFormat');
+      const fmt = currentFormat ? JSON.parse(currentFormat) : 'pcm_44100';
+      prompts.forEach((p, idx) => {
+        firePregen(p, idx, { outputFormat: fmt }, genId);
+      });
+    } catch (err) {
+      setStatus(`Error loading prompts: ${err?.response?.data?.detail || err.message}`);
+    }
+  }, [firePregen]);
+
+  // Advance to next unfinished item or generate new batch
+  const advanceBank = useCallback((markStatus) => {
+    // Cancel any in-flight manual generation
+    if (generationAbortRef.current) {
+      generationAbortRef.current.abort();
+      generationAbortRef.current = null;
+    }
+    setLoading(false);
+
+    const curBank = bankRef.current;
+    const curIdx = bankIndexRef.current;
+
+    // Mark current item
+    if (curBank[curIdx]) {
+      const updated = [...curBank];
+      updated[curIdx] = { ...updated[curIdx], status: markStatus };
+      setBank(updated);
+      // Use the updated bank for finding next
+      const next = findNextUnfinished(updated, curIdx);
+      if (next !== -1) {
+        setBankIndex(next);
+        setCurrentPrompt(updated[next].prompt);
+        setAutoPromptDifficulty(null);
+        setScores({ audio_quality_score: null, llm_accuracy_score: null });
+        setGenerationMeta(null);
+        setVariations([]);
+        resetNotesAndAttachments();
+        setNotesPanelOpen(false);
+        setStatus('');
+        // Clear results — bank apply effect will populate when ready
+        setLlmJson(null);
+        setLlmResponse(null);
+        setAudioUrl('');
+      } else {
+        // All items done — generate new batch
+        generateNewBatch();
       }
     }
+  }, [generateNewBatch]);
 
-    // Refill queue + start pregen for any new prompts
-    fetchBatch(rest, next.id, QUEUE_SIZE).then(newQueue => {
-      setPromptQueue(newQueue);
-      const newPrompts = newQueue.filter(p => !pregenResults.current.has(p.id) && !pregenInFlight.current.has(p.id));
-      if (newPrompts.length > 0) {
-        startPregenPipeline(newPrompts, { outputFormat });
-      }
-    });
-    return next;
+  // Find next unfinished item in bank (generating/ready), starting after idx
+  const findNextUnfinished = (bankArr, afterIdx) => {
+    // First look after current index
+    for (let i = afterIdx + 1; i < bankArr.length; i++) {
+      if (bankArr[i].status === 'generating' || bankArr[i].status === 'ready') return i;
+    }
+    // Then wrap around
+    for (let i = 0; i <= afterIdx; i++) {
+      if (bankArr[i].status === 'generating' || bankArr[i].status === 'ready') return i;
+    }
+    return -1;
   };
 
-  // Poll for current prompt's pre-gen result while it's being generated.
-  // Generation is started elsewhere (pipeline, advanceFromQueue, or loadNextPrompt fallback).
-  // This effect only checks the cache and polls — it never starts new generation.
+  // ── Bank apply effect — watches bank/bankIndex, applies result when ready ──
+  // If the current item is still generating, jump to the first ready item.
   useEffect(() => {
-    if (!freeTextMode && currentPrompt && !llmJson && !audioUrl) {
-      const cached = pregenResults.current.get(currentPrompt.id);
-      if (cached) {
-        pregenResults.current.delete(currentPrompt.id);
-        setPregenReadyCount(pregenResults.current.size);
-        applyPregenResult(cached);
-        return;
-      }
-      // Poll until result is ready (generation was already started)
-      const interval = setInterval(() => {
-        const result = pregenResults.current.get(currentPrompt.id);
-        if (result) {
-          pregenResults.current.delete(currentPrompt.id);
-          setPregenReadyCount(pregenResults.current.size);
-          applyPregenResult(result);
-          clearInterval(interval);
-        }
-      }, 500);
-      return () => clearInterval(interval);
-    }
-  }, [currentPrompt?.id, llmJson, audioUrl]);
+    if (freeTextMode) return;
+    const item = bank[bankIndex];
+    if (!item) return;
+    if (lastAppliedBankIndexRef.current === bankIndex && (llmJson || audioUrl)) return;
 
-  // Initial load: populate queue + start pre-generation pipeline
-  useEffect(() => {
-    if (!freeTextMode && !currentPrompt && !hasLoadedInitialPrompt.current) {
-      hasLoadedInitialPrompt.current = true;
-      (async () => {
-        setLoading(true);
-        setStatus('Loading prompts and pre-generating loops...');
-        try {
-          const batch = await fetchBatch([], null, QUEUE_SIZE + 1);
-          if (batch.length > 0) {
-            const [first, ...rest] = batch;
-            setCurrentPrompt(first);
-            setPromptQueue(rest);
-            // Start pre-generating ALL prompts (current + queue) via the pipeline
-            startPregenPipeline(batch, { outputFormat });
-          } else {
-            setStatus('No prompts in the database.');
-          }
-        } catch (err) {
-          setStatus(`Error loading prompts: ${err?.response?.data?.detail || err.message}`);
-        } finally {
-          setLoading(false);
-        }
-      })();
+    if (item.status === 'ready' && item.result) {
+      // Current item is ready — apply it
+      lastAppliedBankIndexRef.current = bankIndex;
+      setCurrentPrompt(item.prompt);
+      applyBankResult(item.result);
+      setBank(prev => {
+        const updated = [...prev];
+        updated[bankIndex] = { ...updated[bankIndex], status: 'rating' };
+        return updated;
+      });
+    } else if (item.status === 'generating') {
+      // Current item still generating — check if ANY other item is ready
+      const readyIdx = bank.findIndex((b, i) => i !== bankIndex && b.status === 'ready');
+      if (readyIdx !== -1) {
+        setBankIndex(readyIdx);
+        // The next render will apply it via the 'ready' branch above
+      }
     }
-  }, []);
+  }, [bank, bankIndex, freeTextMode, applyBankResult, llmJson, audioUrl]);
+
+  // ── Initial load: restore bank or generate new batch ──
+  // Detects stale banks (audio files deleted) and auto-regenerates.
+  useEffect(() => {
+    if (freeTextMode) return;
+    const savedBank = bankRef.current;
+
+    if (savedBank.length === 0) {
+      generateNewBatch();
+      return;
+    }
+
+    // Check if all items are done
+    const allDone = savedBank.every(item =>
+      item.status === 'rated' || item.status === 'skipped' || item.status === 'failed'
+    );
+    if (allDone) {
+      generateNewBatch();
+      return;
+    }
+
+    // Staleness check: find any item with a result (ready/rating) and verify its audio exists
+    const itemWithResult = savedBank.find(item =>
+      (item.status === 'ready' || item.status === 'rating') && item.result?.audioUrl
+    );
+    if (itemWithResult) {
+      fetch(itemWithResult.result.audioUrl, { method: 'HEAD' })
+        .then(res => {
+          if (!res.ok) {
+            // Audio file gone — bank is stale, regenerate
+            console.warn('Stale bank detected (audio 404), regenerating...');
+            generateNewBatch();
+          } else {
+            // Bank is valid — restore normally
+            restoreBank(savedBank);
+          }
+        })
+        .catch(() => {
+          console.warn('Stale bank detected (fetch failed), regenerating...');
+          generateNewBatch();
+        });
+      return;
+    }
+
+    // No items with results yet (all generating/done) — restore and re-fire
+    restoreBank(savedBank);
+
+    function restoreBank(bank) {
+      const curIdx = bankIndexRef.current;
+      const item = bank[curIdx];
+      if (item) {
+        setCurrentPrompt(item.prompt);
+      }
+      // Re-fire any stuck 'generating' items with current gen ID
+      const currentFormat = sessionStorage.getItem('testingPage_outputFormat');
+      const fmt = currentFormat ? JSON.parse(currentFormat) : 'pcm_44100';
+      const genId = batchGenIdRef.current;
+      bank.forEach((item, idx) => {
+        if (item.status === 'generating') {
+          firePregen(item.prompt, idx, { outputFormat: fmt }, genId);
+        }
+      });
+    }
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
 
   const handleNoteFileSelect = (file) => {
     if (!file) return;
@@ -502,51 +607,8 @@ export default function TestingPage() {
     return data?.path || null;
   };
 
-  const loadNextPrompt = async () => {
-    // Cancel any in-flight generation for the current prompt
-    if (generationAbortRef.current) {
-      generationAbortRef.current.abort();
-      generationAbortRef.current = null;
-    }
-    setLoading(false);
-
-    // Read queue from ref to avoid stale closure issues
-    const queue = promptQueueRef.current;
-    if (queue.length > 0) {
-      advanceFromQueue(queue);
-      return;
-    }
-    // Queue empty — fallback to single fetch
-    setStatus('Loading next prompt...');
-    setLoading(true);
-    try {
-      const params = {};
-      if (currentPrompt) {
-        params.current_drum_type = currentPrompt.drum_type;
-        params.current_difficulty = currentPrompt.difficulty;
-        params.exclude_id = currentPrompt.id;
-      }
-      const { data } = await api.get('/api/prompts/next-in-rotation', { params });
-      setCurrentPrompt(data);
-      setLlmJson(null);
-      setLlmResponse(null);
-      setAudioUrl('');
-      setScores({ audio_quality_score: null, llm_accuracy_score: null });
-      setGenerationMeta(null);
-      setVariations([]);
-      resetNotesAndAttachments();
-      setNotesPanelOpen(false);
-      setAutoPromptDifficulty(null);
-      setStatus('');
-      // Start generation for this single prompt (no pipeline covers it)
-      pregenOne(data, { outputFormat });
-      // Re-fill queue in background
-      fetchBatch([], data.id).then(setPromptQueue);
-    } catch (err) {
-      setStatus(`Error loading prompt: ${err?.response?.data?.detail || err.message}`);
-    } finally {
-      setLoading(false);
-    }
+  const loadNextPrompt = () => {
+    advanceBank('skipped');
   };
 
   const sendPrompt = async () => {
@@ -580,7 +642,9 @@ export default function TestingPage() {
       }
       payload.output_format = outputFormat;
 
+      const roundTripStart = performance.now();
       const { data } = await api.post('/api/test/send-prompt', payload, { signal: abortCtrl.signal });
+      const roundTripMs = Math.round(performance.now() - roundTripStart);
       setLlmJson(data.composition_plan);
       setLlmResponse(data.llm_response || null);
       setAudioUrl(data.audio_url ? `${API_BASE_URL}${data.audio_url}` : '');
@@ -601,6 +665,8 @@ export default function TestingPage() {
         key: data.key,
         duration_ms: data.duration_ms,
         api_time_ms: data.api_time_ms,
+        timing: data.timing || null,
+        round_trip_ms: roundTripMs,
       });
 
       const keyLabel = data.key || 'No key';
@@ -737,7 +803,7 @@ export default function TestingPage() {
       if (!freeTextMode) {
         setTimeout(() => {
           setSubmitting(false);
-          loadNextPrompt();
+          advanceBank('rated');
         }, 1000);
       } else {
         setLlmJson(null);
@@ -807,7 +873,7 @@ export default function TestingPage() {
       if (!freeTextMode) {
         setTimeout(() => {
           setSubmitting(false);
-          loadNextPrompt();
+          advanceBank('skipped');
         }, 1000);
       } else {
         setLlmJson(null);
@@ -837,6 +903,10 @@ export default function TestingPage() {
     setGenerationMeta(null);
     setVariations([]);
     setStatus('');
+    if (!newMode) {
+      // Switching back to auto mode — reset apply tracking
+      lastAppliedBankIndexRef.current = -1;
+    }
   };
 
   const handleEditPrompt = () => {
@@ -890,7 +960,7 @@ export default function TestingPage() {
 
       setTimeout(() => {
         setStatus('');
-        loadNextPrompt();
+        advanceBank('skipped');
       }, 1000);
     } catch (err) {
       setStatus(`Error deleting prompt: ${err?.response?.data?.detail || err.message}`);
@@ -902,6 +972,16 @@ export default function TestingPage() {
     setEditMode(false);
     setEditedPromptText('');
   };
+
+  // ── Bank progress calculations ──
+  const bankReadyCount = bank.filter(item => item.status === 'ready' || item.status === 'rating').length;
+  const bankGeneratingCount = bank.filter(item => item.status === 'generating').length;
+  const bankDoneCount = bank.filter(item => item.status === 'rated' || item.status === 'skipped' || item.status === 'failed').length;
+  const bankTotal = bank.length;
+  const bankIsGenerating = bankGeneratingCount > 0;
+  const bankRemainingCount = bank.filter(item =>
+    item.status === 'generating' || item.status === 'ready' || item.status === 'rating'
+  ).length;
 
   return (
     <div className="grid" style={{ maxWidth: '1200px', margin: '0 auto' }}>
@@ -1143,8 +1223,8 @@ export default function TestingPage() {
           /* ── Auto Prompt tab ── */
           currentPrompt ? (
             <div style={{ zIndex: 1 }}>
-              {/* Pre-generation progress */}
-              {pregenTotal > 0 && pregenReadyCount < pregenTotal && (
+              {/* Bank progress bar */}
+              {bankTotal > 0 && (
                 <div style={{
                   display: 'flex', alignItems: 'center', gap: '10px',
                   marginBottom: '12px', padding: '8px 14px',
@@ -1156,14 +1236,18 @@ export default function TestingPage() {
                     background: 'var(--border-color)', overflow: 'hidden',
                   }}>
                     <div style={{
-                      width: `${(pregenReadyCount / pregenTotal) * 100}%`,
+                      width: `${bankIsGenerating
+                        ? ((bankReadyCount + bankDoneCount) / bankTotal) * 100
+                        : (bankDoneCount / bankTotal) * 100}%`,
                       height: '100%', borderRadius: '2px',
                       background: 'var(--primary-color)',
                       transition: 'width 300ms ease',
                     }} />
                   </div>
                   <span style={{ color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
-                    Pre-generating {pregenReadyCount}/{pregenTotal} loops
+                    {bankIsGenerating
+                      ? `Pre-generating ${bankReadyCount + bankDoneCount}/${bankTotal} loops`
+                      : `${bankDoneCount}/${bankTotal} rated`}
                   </span>
                 </div>
               )}
@@ -1176,8 +1260,8 @@ export default function TestingPage() {
                   </span>
                 </div>
                 <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
-                  <span style={{ fontSize: '12px', color: 'var(--text-secondary)', whiteSpace: 'nowrap' }} title="Prompts pre-loaded in queue">
-                    {promptQueue.length} in queue
+                  <span style={{ fontSize: '12px', color: 'var(--text-secondary)', whiteSpace: 'nowrap' }} title="Unfinished items in current batch">
+                    {bankRemainingCount} remaining
                   </span>
                   <button onClick={handleEditPrompt} className="btn btn-secondary" disabled={loading || editMode} style={{ zIndex: 1, fontSize: '13px', padding: '6px 12px' }}>Edit</button>
                   <button onClick={() => setShowDeleteConfirm(true)} className="btn btn-secondary" disabled={loading || editMode} style={{ zIndex: 1, fontSize: '13px', padding: '6px 12px', background: 'var(--error-color)', borderColor: 'var(--error-color)' }}>Delete</button>
@@ -1297,28 +1381,81 @@ export default function TestingPage() {
           {/* Generation Results Header */}
           <div className="card" style={{ zIndex: 1 }}>
             {generationMeta && (
-              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px', alignItems: 'center', marginBottom: '16px' }}>
-                {[
-                  { label: 'BPM',      value: generationMeta.bpm },
-                  { label: 'Key',      value: generationMeta.key || 'None' },
-                  { label: 'Bars',     value: generationMeta.bars },
-                  { label: 'Duration', value: `${(generationMeta.duration_ms / 1000).toFixed(1)}s` },
-                  { label: 'API Time', value: `${(generationMeta.api_time_ms / 1000).toFixed(1)}s` },
-                ].map(({ label, value }) => (
-                  <div key={label} style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '6px',
-                    padding: '6px 14px',
-                    borderRadius: '20px',
-                    background: 'var(--secondary-bg)',
-                    border: '1px solid var(--border-color)',
-                    fontSize: '14px',
-                  }}>
-                    <span style={{ color: 'var(--text-secondary)', fontWeight: '500' }}>{label}</span>
-                    <span style={{ color: 'var(--text-primary)', fontWeight: '600' }}>{value}</span>
-                  </div>
-                ))}
+              <div style={{ marginBottom: '16px' }}>
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px', alignItems: 'center', marginBottom: generationMeta.timing ? '12px' : '0' }}>
+                  {[
+                    { label: 'BPM',      value: generationMeta.bpm },
+                    { label: 'Key',      value: generationMeta.key || 'None' },
+                    { label: 'Bars',     value: generationMeta.bars },
+                    { label: 'Duration', value: `${(generationMeta.duration_ms / 1000).toFixed(1)}s` },
+                  ].map(({ label, value }) => (
+                    <div key={label} style={{
+                      display: 'flex',
+                      alignItems: 'center',
+                      gap: '6px',
+                      padding: '6px 14px',
+                      borderRadius: '20px',
+                      background: 'var(--secondary-bg)',
+                      border: '1px solid var(--border-color)',
+                      fontSize: '14px',
+                    }}>
+                      <span style={{ color: 'var(--text-secondary)', fontWeight: '500' }}>{label}</span>
+                      <span style={{ color: 'var(--text-primary)', fontWeight: '600' }}>{value}</span>
+                    </div>
+                  ))}
+                </div>
+                {generationMeta.timing && (() => {
+                  const t = generationMeta.timing;
+                  const total = generationMeta.round_trip_ms || t.total_backend_time_ms;
+                  const bars = [
+                    { label: 'LLM', ms: t.llm_time_ms, color: '#f59e0b' },
+                    { label: 'Audio Gen', ms: t.audio_gen_time_ms, color: '#8b5cf6' },
+                    { label: 'Processing', ms: t.audio_processing_time_ms, color: '#10b981' },
+                  ];
+                  const overhead = Math.max(0, t.total_backend_time_ms - t.llm_time_ms - t.audio_gen_time_ms - t.audio_processing_time_ms);
+                  if (overhead > 50) bars.push({ label: 'Overhead', ms: overhead, color: '#6b7280' });
+                  if (generationMeta.round_trip_ms) {
+                    const networkMs = Math.max(0, generationMeta.round_trip_ms - t.total_backend_time_ms);
+                    if (networkMs > 50) bars.push({ label: 'Network', ms: networkMs, color: '#3b82f6' });
+                  }
+                  return (
+                    <div style={{ background: 'var(--secondary-bg)', borderRadius: '12px', padding: '12px 16px', border: '1px solid var(--border-color)' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                        <span style={{ fontSize: '13px', fontWeight: '600', color: 'var(--text-secondary)' }}>Timing Breakdown</span>
+                        <span style={{ fontSize: '13px', fontWeight: '700', color: 'var(--text-primary)' }}>{(total / 1000).toFixed(1)}s total</span>
+                      </div>
+                      <div style={{ display: 'flex', borderRadius: '6px', overflow: 'hidden', height: '22px', marginBottom: '8px' }}>
+                        {bars.map(b => {
+                          const pct = Math.max(1, (b.ms / total) * 100);
+                          return (
+                            <div key={b.label} title={`${b.label}: ${(b.ms / 1000).toFixed(2)}s`} style={{
+                              width: `${pct}%`, background: b.color, display: 'flex', alignItems: 'center', justifyContent: 'center',
+                              fontSize: '10px', fontWeight: '700', color: '#fff', minWidth: '2px', overflow: 'hidden', whiteSpace: 'nowrap',
+                            }}>
+                              {pct > 12 ? `${(b.ms / 1000).toFixed(1)}s` : ''}
+                            </div>
+                          );
+                        })}
+                      </div>
+                      <div style={{ display: 'flex', flexWrap: 'wrap', gap: '12px', fontSize: '12px' }}>
+                        {bars.map(b => (
+                          <div key={b.label} style={{ display: 'flex', alignItems: 'center', gap: '5px' }}>
+                            <div style={{ width: '8px', height: '8px', borderRadius: '50%', background: b.color }} />
+                            <span style={{ color: 'var(--text-secondary)' }}>{b.label}</span>
+                            <span style={{ fontWeight: '700', color: 'var(--text-primary)' }}>{(b.ms / 1000).toFixed(2)}s</span>
+                          </div>
+                        ))}
+                      </div>
+                      {(t.llm_input_tokens > 0 || t.llm_output_tokens > 0) && (
+                        <div style={{ marginTop: '8px', paddingTop: '8px', borderTop: '1px solid var(--border-color)', display: 'flex', gap: '16px', fontSize: '12px' }}>
+                          <span style={{ color: 'var(--text-secondary)' }}>LLM Tokens:</span>
+                          <span style={{ color: 'var(--text-primary)', fontWeight: '600' }}>{t.llm_input_tokens.toLocaleString()} in</span>
+                          <span style={{ color: 'var(--text-primary)', fontWeight: '600' }}>{t.llm_output_tokens.toLocaleString()} out</span>
+                        </div>
+                      )}
+                    </div>
+                  );
+                })()}
               </div>
             )}
 

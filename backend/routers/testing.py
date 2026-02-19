@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 import uuid
 from pathlib import Path
 from typing import Any, Optional
@@ -40,6 +41,15 @@ class VariationResult(BaseModel):
     original_audio_url: Optional[str] = None
 
 
+class TimingBreakdown(BaseModel):
+    llm_time_ms: int
+    audio_gen_time_ms: int
+    audio_processing_time_ms: int
+    total_backend_time_ms: int
+    llm_input_tokens: int
+    llm_output_tokens: int
+
+
 class SendPromptResponse(BaseModel):
     prompt_id: Optional[int]
     prompt_text: str
@@ -54,6 +64,7 @@ class SendPromptResponse(BaseModel):
     key: Optional[str] = None
     duration_ms: int
     api_time_ms: int
+    timing: Optional[TimingBreakdown] = None
 
 
 async def get_music_client():
@@ -67,16 +78,19 @@ async def get_music_client():
 async def _generate_and_save(client: ElevenLabsMusicClient, composition_plan: dict, output_format: str) -> dict:
     """Generate audio, save crossfaded loop version.
 
-    Returns dict with audio_id, audio_url, api_time_ms.
+    Returns dict with audio_id, audio_url, api_time_ms, processing_time_ms.
     Original (non-crossfaded) audio is not saved since no key
     transposition is applied — it would be redundant.
     """
     raw_audio, api_time_ms = await client.generate_audio(composition_plan, output_format)
+
+    proc_start = time.time()
     loop_wav = client.process_audio(raw_audio, output_format)
 
     loop_id = str(uuid.uuid4())
     with open(AUDIO_DIR / f"{loop_id}.wav", "wb") as f:
         f.write(loop_wav)
+    processing_time_ms = int((time.time() - proc_start) * 1000)
 
     return {
         "audio_id": loop_id,
@@ -84,6 +98,7 @@ async def _generate_and_save(client: ElevenLabsMusicClient, composition_plan: di
         "original_audio_id": None,
         "original_audio_url": None,
         "api_time_ms": api_time_ms,
+        "processing_time_ms": processing_time_ms,
     }
 
 
@@ -115,9 +130,11 @@ async def send_prompt(
     key_for_llm = "auto" if key_is_auto else payload.key
     duration_for_llm = None if bpm_is_auto else calc_duration_ms(payload.bpm, payload.bars)
 
+    total_start = time.time()
+
     # Step 1: 1 LLM call -> composition plan
     try:
-        composition_plan, raw_llm_text = await client.generate_composition_plan(
+        composition_plan, raw_llm_text, llm_stats = await client.generate_composition_plan(
             prompt_text, bpm_for_llm, payload.bars, key_for_llm, duration_for_llm
         )
     except Exception as e:
@@ -139,6 +156,7 @@ async def send_prompt(
     duration_ms = calc_duration_ms(final_bpm, payload.bars)
 
     # Step 2: 2 parallel ElevenLabs calls from the same composition plan
+    audio_gen_start = time.time()
     try:
         results = await asyncio.gather(
             _generate_and_save(client, composition_plan, payload.output_format),
@@ -149,9 +167,11 @@ async def send_prompt(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"ElevenLabs audio generation failed: {e}"
         ) from e
+    audio_gen_wall_ms = int((time.time() - audio_gen_start) * 1000)
 
     primary = results[0]
     max_api_ms = max(r["api_time_ms"] for r in results)
+    max_proc_ms = max(r["processing_time_ms"] for r in results)
 
     variations = [
         VariationResult(
@@ -164,6 +184,16 @@ async def send_prompt(
     ]
 
     difficulty_val = prompt_obj.difficulty if prompt_obj else None
+    total_backend_ms = int((time.time() - total_start) * 1000)
+
+    timing = TimingBreakdown(
+        llm_time_ms=llm_stats["llm_time_ms"],
+        audio_gen_time_ms=max_api_ms,
+        audio_processing_time_ms=max_proc_ms,
+        total_backend_time_ms=total_backend_ms,
+        llm_input_tokens=llm_stats["input_tokens"],
+        llm_output_tokens=llm_stats["output_tokens"],
+    )
 
     return SendPromptResponse(
         prompt_id=prompt_id,
@@ -179,4 +209,5 @@ async def send_prompt(
         key=final_key,
         duration_ms=duration_ms,
         api_time_ms=max_api_ms,
+        timing=timing,
     )
