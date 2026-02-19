@@ -17,10 +17,7 @@ export default function ResultsPage() {
   const noteFileInputRef = useRef(null);
   
   // Filters (initialize from navigation state if provided)
-  const [drumTypeFilter, setDrumTypeFilter] = useState(location.state?.drumType || 'all');
-  const [drumTypeKeyFilter, setDrumTypeKeyFilter] = useState(location.state?.drumTypeKey || null);
   const [difficultyFilter, setDifficultyFilter] = useState(location.state?.difficulty ? String(location.state.difficulty) : 'all');
-  const [versionFilter, setVersionFilter] = useState(location.state?.modelVersion || 'all');
   const [audioScoreFilter, setAudioScoreFilter] = useState(location.state?.audioScore ? String(location.state.audioScore) : 'all');
   const [hasNotesFilter, setHasNotesFilter] = useState(false);
   
@@ -42,27 +39,11 @@ export default function ResultsPage() {
     return map;
   }, [results]);
   
-  // Memoize available drum types from results
-  const availableDrumTypes = useMemo(() => {
-    const types = new Set();
-    results.forEach(r => {
-      if (r.prompt?.drum_type) {
-        types.add(r.prompt.drum_type);
-      }
-    });
-    return Array.from(types).sort();
-  }, [results]);
-  
   // Update filters when navigating to results page with state (e.g., clicking from dashboard)
-  // Use location.key to detect navigation changes even when pathname stays the same
   useEffect(() => {
     const state = location.state;
     if (state) {
-      // Update filters from navigation state - always update when state is present
-      setDrumTypeFilter(state.drumType || 'all');
-      setDrumTypeKeyFilter(state.drumTypeKey || null);
       setDifficultyFilter(state.difficulty !== undefined && state.difficulty !== null ? String(state.difficulty) : 'all');
-      setVersionFilter(state.modelVersion || 'all');
       setAudioScoreFilter(state.audioScore !== undefined && state.audioScore !== null ? String(state.audioScore) : 'all');
     }
   }, [location.key, location.state]);
@@ -70,7 +51,7 @@ export default function ResultsPage() {
   // Load results when filters change
   useEffect(() => {
     loadResults();
-  }, [drumTypeFilter, drumTypeKeyFilter, difficultyFilter, versionFilter, audioScoreFilter, hasNotesFilter]);
+  }, [difficultyFilter, audioScoreFilter, hasNotesFilter]);
 
   const handleNoteFileSelect = (file) => {
     if (!file) return;
@@ -126,13 +107,7 @@ export default function ResultsPage() {
     setLoading(true);
     try {
       const params = {};
-      if (drumTypeKeyFilter) {
-        params.drum_type_key = drumTypeKeyFilter;
-      } else if (drumTypeFilter !== 'all') {
-        params.drum_type = drumTypeFilter;
-      }
       if (difficultyFilter !== 'all') params.difficulty = parseInt(difficultyFilter);
-      if (versionFilter !== 'all') params.model_version = versionFilter;
       if (audioScoreFilter !== 'all') params.audio_quality_score = parseInt(audioScoreFilter);
       if (hasNotesFilter) params.has_notes = true;
       
@@ -276,17 +251,9 @@ export default function ResultsPage() {
           aVal = prompts[a.prompt_id]?.text || '';
           bVal = prompts[b.prompt_id]?.text || '';
           break;
-        case 'drum_type':
-          aVal = prompts[a.prompt_id]?.drum_type || '';
-          bVal = prompts[b.prompt_id]?.drum_type || '';
-          break;
         case 'difficulty':
           aVal = prompts[a.prompt_id]?.difficulty || 0;
           bVal = prompts[b.prompt_id]?.difficulty || 0;
-          break;
-        case 'version':
-          aVal = a.model_version || '';
-          bVal = b.model_version || '';
           break;
         case 'audio_score':
           aVal = a.audio_quality_score;
@@ -335,19 +302,13 @@ export default function ResultsPage() {
 
   // Check if any filters are active (not default)
   const hasActiveFilters = () => {
-    return drumTypeFilter !== 'all' || 
-           difficultyFilter !== 'all' || 
-           versionFilter !== 'all' || 
+    return difficultyFilter !== 'all' || 
            audioScoreFilter !== 'all' || 
            hasNotesFilter;
   };
 
-  // Reset all filters to default
   const resetFilters = () => {
-    setDrumTypeFilter('all');
-    setDrumTypeKeyFilter(null);
     setDifficultyFilter('all');
-    setVersionFilter('all');
     setAudioScoreFilter('all');
     setHasNotesFilter(false);
   };
@@ -425,41 +386,12 @@ export default function ResultsPage() {
         </div>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '16px' }}>
           <div>
-            <label className="label">Drum Type</label>
-            <select 
-              value={drumTypeFilter} 
-              onChange={(e) => {
-                setDrumTypeFilter(e.target.value);
-                setDrumTypeKeyFilter(null);
-              }} 
-              className="input"
-            >
-              <option value="all">All</option>
-              {availableDrumTypes.map(dt => (
-                <option key={dt} value={dt}>{dt}</option>
-              ))}
-            </select>
-          </div>
-          <div>
             <label className="label">Difficulty</label>
             <select value={difficultyFilter} onChange={(e) => setDifficultyFilter(e.target.value)} className="input">
               <option value="all">All</option>
               {[...Array(10)].map((_, i) => (
                 <option key={i + 1} value={String(i + 1)}>{i + 1}</option>
               ))}
-            </select>
-          </div>
-          <div>
-            <label className="label">Model Version</label>
-            <select value={versionFilter} onChange={(e) => setVersionFilter(e.target.value)} className="input">
-              <option value="all">All</option>
-              <option value="v11">V11</option>
-              <option value="v12">V12</option>
-              <option value="v13">V13</option>
-              <option value="v14">V14</option>
-              <option value="v15">V15</option>
-              <option value="v16">V16</option>
-              <option value="v17">V17</option>
             </select>
           </div>
           <div>
@@ -576,22 +508,10 @@ export default function ResultsPage() {
                 Prompt {sortColumn === 'prompt' && (sortDirection === 'asc' ? '↑' : '↓')}
               </th>
               <th 
-                onClick={() => handleSort('drum_type')} 
-                style={{ padding: '12px', textAlign: 'left', fontWeight: '600', cursor: 'pointer', userSelect: 'none' }}
-              >
-                Drum {sortColumn === 'drum_type' && (sortDirection === 'asc' ? '↑' : '↓')}
-              </th>
-              <th 
                 onClick={() => handleSort('difficulty')} 
                 style={{ padding: '12px', textAlign: 'center', fontWeight: '600', cursor: 'pointer', userSelect: 'none' }}
               >
                 Diff {sortColumn === 'difficulty' && (sortDirection === 'asc' ? '↑' : '↓')}
-              </th>
-              <th 
-                onClick={() => handleSort('version')} 
-                style={{ padding: '12px', textAlign: 'center', fontWeight: '600', cursor: 'pointer', userSelect: 'none' }}
-              >
-                Version {sortColumn === 'version' && (sortDirection === 'asc' ? '↑' : '↓')}
               </th>
               <th 
                 onClick={() => handleSort('audio_score')} 
@@ -616,7 +536,7 @@ export default function ResultsPage() {
           <tbody>
             {results.length === 0 ? (
               <tr>
-                <td colSpan="8" style={{ padding: '40px', textAlign: 'center', color: 'var(--text-secondary)' }}>
+                <td colSpan="6" style={{ padding: '40px', textAlign: 'center', color: 'var(--text-secondary)' }}>
                   No results found. Start testing to see results here!
                 </td>
               </tr>
@@ -672,9 +592,7 @@ export default function ResultsPage() {
                     <td style={{ padding: '12px', maxWidth: '300px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
                       {prompt?.text || 'Loading...'}
                     </td>
-                    <td style={{ padding: '12px' }}>{prompt?.drum_type || '-'}</td>
                     <td style={{ padding: '12px', textAlign: 'center' }}>{prompt?.difficulty || '-'}</td>
-                    <td style={{ padding: '12px', textAlign: 'center', textTransform: 'uppercase' }}>{result.model_version || '-'}</td>
                     <td style={{ padding: '12px', textAlign: 'center', fontWeight: '600', color: getScoreColor(result.audio_quality_score) }}>
                       {result.audio_quality_score}
                     </td>
@@ -794,17 +712,39 @@ export default function ResultsPage() {
                 <div style={{ fontSize: '14px', fontWeight: '600', marginBottom: '8px' }}>Prompt:</div>
                 <div style={{ fontSize: '15px' }}>{prompts[selectedResult.prompt_id]?.text}</div>
                 <div style={{ marginTop: '12px', display: 'flex', gap: '20px', fontSize: '13px', color: 'var(--text-secondary)' }}>
-                  <span>Drum: <strong>{prompts[selectedResult.prompt_id]?.drum_type}</strong></span>
                   <span>Difficulty: <strong>{prompts[selectedResult.prompt_id]?.difficulty}</strong></span>
-                  <span>Version: <strong>{selectedResult.model_version?.toUpperCase()}</strong></span>
                 </div>
               </div>
 
-              {/* Audio Player */}
-              {selectedResult.audio_id && (
+              {/* Audio Players */}
+              {(selectedResult.audio_variations?.length > 0 || selectedResult.audio_id) && (
                 <div style={{ marginBottom: '20px' }}>
                   <div style={{ fontSize: '14px', fontWeight: '600', marginBottom: '8px' }}>Audio:</div>
-                  <AudioPlayer src={`${API_BASE_URL}/api/audio/${selectedResult.audio_id}`} />
+                  {selectedResult.audio_variations?.length > 0 ? (
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+                      {selectedResult.audio_variations.map((v, idx) => (
+                        <div key={v.audio_id || idx}>
+                          <div style={{ fontSize: '13px', fontWeight: '600', color: 'var(--text-primary)', marginBottom: '6px' }}>
+                            Variation {idx + 1}
+                          </div>
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                            <div>
+                              <div style={{ fontSize: '11px', color: 'var(--primary-color)', marginBottom: '3px', fontWeight: '500' }}>Loop (crossfaded)</div>
+                              <AudioPlayer src={`${API_BASE_URL}/api/audio/${v.audio_id}`} />
+                            </div>
+                            {v.original_audio_id && (
+                              <div>
+                                <div style={{ fontSize: '11px', color: 'var(--text-secondary)', marginBottom: '3px', fontWeight: '500' }}>Original (pre-crossfade)</div>
+                                <AudioPlayer src={`${API_BASE_URL}/api/audio/${v.original_audio_id}`} loop={false} />
+                              </div>
+                            )}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  ) : (
+                    <AudioPlayer src={`${API_BASE_URL}/api/audio/${selectedResult.audio_id}`} />
+                  )}
                 </div>
               )}
 

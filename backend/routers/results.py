@@ -1,7 +1,5 @@
 from __future__ import annotations
 
-from __future__ import annotations
-
 import logging
 import re
 from datetime import datetime
@@ -12,7 +10,7 @@ from uuid import uuid4
 
 from fastapi import APIRouter, Depends, HTTPException, status, UploadFile, File
 from fastapi.responses import FileResponse, JSONResponse
-from sqlalchemy import func, select, or_, and_
+from sqlalchemy import func, select, or_, and_, update
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
@@ -33,7 +31,7 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
-NOTE_AUDIO_DIR = Path("./note_attachments")
+NOTE_AUDIO_DIR = Path(__file__).resolve().parents[2] / "note_attachments"
 NOTE_AUDIO_DIR.mkdir(exist_ok=True)
 
 
@@ -59,7 +57,7 @@ async def submit_score(
     if payload.free_text_prompt and not payload.prompt_id:
         new_prompt = Prompt(
             text=payload.free_text_prompt,
-            difficulty=payload.free_text_difficulty or 5,
+            difficulty=int(payload.free_text_difficulty) if payload.free_text_difficulty is not None else 5,
             category=payload.free_text_category or "user-generated",
             drum_type=payload.free_text_drum_type,
             is_user_generated=True,
@@ -76,8 +74,22 @@ async def submit_score(
         prompt = await session.get(Prompt, prompt_id)
         if not prompt:
             raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Prompt not found")
+        # Update the prompt difficulty with the user's rating via explicit SQL UPDATE
+        if payload.free_text_difficulty is not None:
+            logger.info(
+                "Updating prompt %s difficulty: %s -> %s",
+                prompt_id, prompt.difficulty, payload.free_text_difficulty,
+            )
+            await session.execute(
+                update(Prompt)
+                .where(Prompt.id == prompt_id)
+                .values(difficulty=int(payload.free_text_difficulty))
+            )
+            await session.commit()
+            # Expire the cached ORM object so it reloads with the new value
+            await session.refresh(prompt)
 
-    # Calculate generation score
+    # Calculate generation score using the (now up-to-date) difficulty
     audio_score = payload.audio_quality_score
     llm_score = payload.llm_accuracy_score
     gen_score = None
@@ -93,6 +105,7 @@ async def submit_score(
         llm_response=payload.llm_response,
         audio_id=payload.audio_id,
         audio_file_path=payload.audio_file_path,
+        audio_variations=payload.audio_variations,
         model_version=payload.model_version,
         notes=payload.notes,
         notes_audio_path=payload.notes_audio_path,

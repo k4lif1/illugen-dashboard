@@ -399,8 +399,17 @@ class ElevenLabsMusicClient:
             sr = int(output_format.split("_")[1])
             wav_data = pcm_to_wav(raw_audio, sample_rate=sr)
             return crossfade_loop(wav_data)
-        # For mp3 or other formats, return as-is
         return raw_audio
+
+    @staticmethod
+    def process_audio_both(raw_audio: bytes, output_format: str = "pcm_44100") -> tuple[bytes, bytes]:
+        """Convert raw PCM to WAV and return (original_wav, crossfaded_loop_wav)."""
+        if output_format.startswith("pcm"):
+            sr = int(output_format.split("_")[1])
+            original_wav = pcm_to_wav(raw_audio, sample_rate=sr)
+            loop_wav = crossfade_loop(original_wav)
+            return original_wav, loop_wav
+        return raw_audio, raw_audio
 
     async def close(self) -> None:
         await self._http.aclose()

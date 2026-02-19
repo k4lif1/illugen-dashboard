@@ -2,7 +2,6 @@ import React, { useState, useEffect, useRef } from 'react';
 import api, { API_BASE_URL } from '../services/api';
 import AudioPlayer from '../components/AudioPlayer';
 import ScoringSliders from '../components/ScoringSliders';
-import DifficultySlider from '../components/DifficultySlider';
 import JsonViewer from '../components/JsonViewer';
 
 export default function TestingPage() {
@@ -70,7 +69,21 @@ export default function TestingPage() {
   const [freeTextError, setFreeTextError] = useState(false);
   const [generationScoreError, setGenerationScoreError] = useState(false);
   const [llmScoreError, setLlmScoreError] = useState(false);
-  const [showDifficultyTooltip, setShowDifficultyTooltip] = useState(false);
+
+  // Prompt queue — pre-fetched batch so the next prompt is always ready
+  const QUEUE_SIZE = 10;
+  const [promptQueue, setPromptQueue] = useState(() => getInitialState('promptQueue', []));
+  const promptQueueRef = useRef(promptQueue);
+  useEffect(() => { promptQueueRef.current = promptQueue; }, [promptQueue]);
+
+  // Pre-generation pipeline — generates audio for queued prompts in background
+  const pregenResults = useRef(new Map());
+  const pregenInFlight = useRef(new Set());
+  const [pregenReadyCount, setPregenReadyCount] = useState(0);
+  const [pregenTotal, setPregenTotal] = useState(0);
+
+  // User-set difficulty for auto-prompt mode (independent of prompt DB value)
+  const [autoPromptDifficulty, setAutoPromptDifficulty] = useState(() => getInitialState('autoPromptDifficulty', null));
 
   // Edit/Delete prompt state
   const [editMode, setEditMode] = useState(false);
@@ -89,6 +102,8 @@ export default function TestingPage() {
       'testingPage_freeTextMetadata',
       'testingPage_generationMeta',
       'testingPage_variations',
+      'testingPage_promptQueue',
+      'testingPage_autoPromptDifficulty',
     ].forEach((key) => sessionStorage.removeItem(key));
 
     setStatus('');
@@ -180,6 +195,14 @@ export default function TestingPage() {
     sessionStorage.setItem('testingPage_generationMeta', JSON.stringify(generationMeta));
   }, [generationMeta]);
 
+  useEffect(() => {
+    sessionStorage.setItem('testingPage_promptQueue', JSON.stringify(promptQueue));
+  }, [promptQueue]);
+
+  useEffect(() => {
+    sessionStorage.setItem('testingPage_autoPromptDifficulty', JSON.stringify(autoPromptDifficulty));
+  }, [autoPromptDifficulty]);
+
   // Track when generation completes for letter drop animation
   useEffect(() => {
     if (loading) {
@@ -196,6 +219,60 @@ export default function TestingPage() {
 
   // Track if we've loaded the initial prompt (only once per component lifecycle)
   const hasLoadedInitialPrompt = useRef(false);
+  // AbortController for cancelling in-flight generation when skipping
+  const generationAbortRef = useRef(null);
+
+  // Derive logical BPM / bars / key from prompt text for auto-prompt mode
+  const getSettingsForPrompt = (text) => {
+    const t = (text || '').toLowerCase();
+
+    // BPM ranges by genre/style keywords
+    const bpmRules = [
+      { pattern: /\b(drill|uk drill)\b/, min: 140, max: 150 },
+      { pattern: /\b(trap|phonk)\b/, min: 130, max: 155 },
+      { pattern: /\b(dnb|drum\s*(?:and|&|n)\s*bass|jungle)\b/, min: 160, max: 180 },
+      { pattern: /\b(dubstep|riddim)\b/, min: 140, max: 150 },
+      { pattern: /\b(house|deep house|tech house|disco)\b/, min: 120, max: 128 },
+      { pattern: /\b(techno|industrial)\b/, min: 125, max: 138 },
+      { pattern: /\b(edm|dance|electro)\b/, min: 124, max: 132 },
+      { pattern: /\b(pop|synth.?pop|indie)\b/, min: 100, max: 128 },
+      { pattern: /\b(r&b|rnb|neo.?soul|soul)\b/, min: 70, max: 95 },
+      { pattern: /\b(hip\s*hop|boom\s*bap|lo.?fi|lofi)\b/, min: 80, max: 100 },
+      { pattern: /\b(reggae(ton)?|dancehall)\b/, min: 90, max: 105 },
+      { pattern: /\b(latin|salsa|bossa)\b/, min: 100, max: 120 },
+      { pattern: /\b(rock|punk|metal|grunge)\b/, min: 110, max: 160 },
+      { pattern: /\b(jazz|swing|blues)\b/, min: 90, max: 140 },
+      { pattern: /\b(ambient|chill|downtempo|meditation)\b/, min: 60, max: 85 },
+      { pattern: /\b(cinematic|orchestral|epic)\b/, min: 80, max: 120 },
+      { pattern: /\b(funk|groove)\b/, min: 100, max: 120 },
+      { pattern: /\b(afro|afrobeat)\b/, min: 100, max: 115 },
+      { pattern: /\b(garage|2.?step)\b/, min: 130, max: 140 },
+    ];
+    let bpmMin = 85, bpmMax = 130;
+    for (const rule of bpmRules) {
+      if (rule.pattern.test(t)) { bpmMin = rule.min; bpmMax = rule.max; break; }
+    }
+    const bpmVal = bpmMin + Math.floor(Math.random() * (bpmMax - bpmMin + 1));
+
+    // Bars: longer loops for ambient/cinematic/jazz, shorter for punchy genres
+    let barsVal = 4;
+    if (/\b(ambient|cinematic|orchestral|epic|chill|downtempo|jazz)\b/.test(t)) barsVal = 8;
+    else if (/\b(stinger|one.?shot|fill|riser|impact)\b/.test(t)) barsVal = 2;
+    else barsVal = Math.random() < 0.35 ? 8 : 4;
+
+    // Key: pick from a set with tonal variety, bias minor for dark/moody
+    const majorKeys = ['C major','D major','E major','F major','G major','A major','Bb major','Eb major'];
+    const minorKeys = ['A minor','C minor','D minor','E minor','F# minor','G minor','B minor','Eb minor'];
+    const darkWords = /\b(dark|moody|minor|sad|melanchol|eerie|horror|sinister|aggressive|hard|evil)\b/;
+    const brightWords = /\b(bright|happy|major|uplifting|upbeat|cheerful|sunny|joy)\b/;
+    let keyPool;
+    if (darkWords.test(t)) keyPool = minorKeys;
+    else if (brightWords.test(t)) keyPool = majorKeys;
+    else keyPool = [...majorKeys, ...minorKeys];
+    const keyVal = keyPool[Math.floor(Math.random() * keyPool.length)];
+
+    return { bpm: bpmVal, bars: barsVal, key: keyVal };
+  };
 
   // Reset edit mode when loading a new prompt
   useEffect(() => {
@@ -204,11 +281,187 @@ export default function TestingPage() {
     }
   }, [currentPrompt?.id]);
 
-  // Load initial prompt only if no state exists (first load or after refresh)
+  // Fetch a batch of prompts for the queue, excluding IDs already in queue + current
+  const fetchBatch = async (currentQueue = [], currentId = null, count = QUEUE_SIZE) => {
+    const excludeIds = currentQueue.map(p => p.id);
+    if (currentId) excludeIds.push(currentId);
+    const needed = Math.max(0, count - currentQueue.length);
+    if (needed === 0) return currentQueue;
+    try {
+      const params = { count: needed };
+      if (excludeIds.length) params.exclude_ids = excludeIds.join(',');
+      const { data } = await api.get('/api/prompts/batch', { params });
+      return [...currentQueue, ...data];
+    } catch {
+      return currentQueue;
+    }
+  };
+
+  // Pre-generate a single prompt and store result
+  const pregenOne = async (prompt, settings) => {
+    if (pregenResults.current.has(prompt.id) || pregenInFlight.current.has(prompt.id)) return;
+    pregenInFlight.current.add(prompt.id);
+    try {
+      // Derive logical settings from prompt text (auto-prompt mode)
+      const derived = getSettingsForPrompt(prompt.text);
+      const payload = { prompt_id: prompt.id, bars: derived.bars, output_format: settings.outputFormat };
+      payload.bpm = derived.bpm;
+      payload.key = derived.key;
+      const { data } = await api.post('/api/test/send-prompt', payload);
+      pregenResults.current.set(prompt.id, {
+        llmJson: data.composition_plan,
+        llmResponse: data.llm_response || null,
+        audioUrl: data.audio_url ? `${API_BASE_URL}${data.audio_url}` : '',
+        audioId: data.audio_id || '',
+        audioFilePath: data.audio_url || '',
+        variations: (data.variations || []).map(v => ({
+          audio_id: v.audio_id,
+          audio_url: `${API_BASE_URL}${v.audio_url}`,
+          original_audio_id: v.original_audio_id || null,
+          original_audio_url: v.original_audio_url ? `${API_BASE_URL}${v.original_audio_url}` : null,
+        })),
+        generationMeta: { bpm: data.bpm, bars: data.bars, key: data.key, duration_ms: data.duration_ms, api_time_ms: data.api_time_ms },
+      });
+      setPregenReadyCount(pregenResults.current.size);
+    } catch (err) {
+      console.error(`Pre-gen failed for prompt ${prompt.id}:`, err);
+    } finally {
+      pregenInFlight.current.delete(prompt.id);
+    }
+  };
+
+  // Run pre-generation pipeline with limited concurrency
+  const startPregenPipeline = (prompts, settings) => {
+    setPregenTotal(prompts.length);
+    const queue = [...prompts];
+    const MAX_CONCURRENT = 2;
+    const worker = async () => {
+      while (queue.length > 0) {
+        const p = queue.shift();
+        if (p) await pregenOne(p, settings);
+      }
+    };
+    for (let i = 0; i < Math.min(MAX_CONCURRENT, prompts.length); i++) worker();
+  };
+
+  // Apply a pre-generated result to the current UI state
+  const applyPregenResult = (result) => {
+    setLlmJson(result.llmJson);
+    setLlmResponse(result.llmResponse);
+    setAudioUrl(result.audioUrl);
+    setAudioId(result.audioId);
+    setAudioFilePath(result.audioFilePath);
+    setVariations(result.variations);
+    setGenerationMeta(result.generationMeta);
+    setNoteAttachments([]);
+    setNoteAudioFile(null);
+    setNoteAudioPath('');
+    const keyLabel = result.generationMeta.key || 'No key';
+    setStatus(`Generated in ${(result.generationMeta.api_time_ms / 1000).toFixed(1)}s | ${result.generationMeta.duration_ms}ms @ ${result.generationMeta.bpm} BPM | ${keyLabel}`);
+  };
+
+  // Pop the next prompt from the queue and refill in background
+  const advanceFromQueue = (queue) => {
+    if (queue.length === 0) return null;
+    const [next, ...rest] = queue;
+    setPromptQueue(rest);
+    setAutoPromptDifficulty(null);
+    setScores({ audio_quality_score: null, llm_accuracy_score: null });
+    setGenerationMeta(null);
+    setVariations([]);
+    resetNotesAndAttachments();
+    setNotesPanelOpen(false);
+    setStatus('');
+
+    // Check if pre-gen result is already available
+    const cached = pregenResults.current.get(next.id);
+    if (cached) {
+      // Apply cached result directly — no setTimeout to avoid race
+      pregenResults.current.delete(next.id);
+      setPregenReadyCount(pregenResults.current.size);
+      setCurrentPrompt(next);
+      setLlmJson(cached.llmJson);
+      setLlmResponse(cached.llmResponse);
+      setAudioUrl(cached.audioUrl);
+      setAudioId(cached.audioId);
+      setAudioFilePath(cached.audioFilePath);
+      setVariations(cached.variations);
+      setGenerationMeta(cached.generationMeta);
+      const keyLabel = cached.generationMeta.key || 'No key';
+      setStatus(`Generated in ${(cached.generationMeta.api_time_ms / 1000).toFixed(1)}s | ${cached.generationMeta.duration_ms}ms @ ${cached.generationMeta.bpm} BPM | ${keyLabel}`);
+    } else {
+      // No cached result yet — set prompt and clear results (will poll below)
+      setCurrentPrompt(next);
+      setLlmJson(null);
+      setLlmResponse(null);
+      setAudioUrl('');
+      // If not even in-flight, kick off generation for this prompt
+      if (!pregenInFlight.current.has(next.id)) {
+        pregenOne(next, { outputFormat });
+      }
+    }
+
+    // Refill queue + start pregen for any new prompts
+    fetchBatch(rest, next.id, QUEUE_SIZE).then(newQueue => {
+      setPromptQueue(newQueue);
+      const newPrompts = newQueue.filter(p => !pregenResults.current.has(p.id) && !pregenInFlight.current.has(p.id));
+      if (newPrompts.length > 0) {
+        startPregenPipeline(newPrompts, { outputFormat });
+      }
+    });
+    return next;
+  };
+
+  // Poll for current prompt's pre-gen result while it's being generated.
+  // Generation is started elsewhere (pipeline, advanceFromQueue, or loadNextPrompt fallback).
+  // This effect only checks the cache and polls — it never starts new generation.
+  useEffect(() => {
+    if (!freeTextMode && currentPrompt && !llmJson && !audioUrl) {
+      const cached = pregenResults.current.get(currentPrompt.id);
+      if (cached) {
+        pregenResults.current.delete(currentPrompt.id);
+        setPregenReadyCount(pregenResults.current.size);
+        applyPregenResult(cached);
+        return;
+      }
+      // Poll until result is ready (generation was already started)
+      const interval = setInterval(() => {
+        const result = pregenResults.current.get(currentPrompt.id);
+        if (result) {
+          pregenResults.current.delete(currentPrompt.id);
+          setPregenReadyCount(pregenResults.current.size);
+          applyPregenResult(result);
+          clearInterval(interval);
+        }
+      }, 500);
+      return () => clearInterval(interval);
+    }
+  }, [currentPrompt?.id, llmJson, audioUrl]);
+
+  // Initial load: populate queue + start pre-generation pipeline
   useEffect(() => {
     if (!freeTextMode && !currentPrompt && !hasLoadedInitialPrompt.current) {
-      loadNextPrompt(true);
       hasLoadedInitialPrompt.current = true;
+      (async () => {
+        setLoading(true);
+        setStatus('Loading prompts and pre-generating loops...');
+        try {
+          const batch = await fetchBatch([], null, QUEUE_SIZE + 1);
+          if (batch.length > 0) {
+            const [first, ...rest] = batch;
+            setCurrentPrompt(first);
+            setPromptQueue(rest);
+            // Start pre-generating ALL prompts (current + queue) via the pipeline
+            startPregenPipeline(batch, { outputFormat });
+          } else {
+            setStatus('No prompts in the database.');
+          }
+        } catch (err) {
+          setStatus(`Error loading prompts: ${err?.response?.data?.detail || err.message}`);
+        } finally {
+          setLoading(false);
+        }
+      })();
     }
   }, []);
 
@@ -249,20 +502,30 @@ export default function TestingPage() {
     return data?.path || null;
   };
 
-  const loadNextPrompt = async (isInitialLoad = false) => {
+  const loadNextPrompt = async () => {
+    // Cancel any in-flight generation for the current prompt
+    if (generationAbortRef.current) {
+      generationAbortRef.current.abort();
+      generationAbortRef.current = null;
+    }
+    setLoading(false);
+
+    // Read queue from ref to avoid stale closure issues
+    const queue = promptQueueRef.current;
+    if (queue.length > 0) {
+      advanceFromQueue(queue);
+      return;
+    }
+    // Queue empty — fallback to single fetch
     setStatus('Loading next prompt...');
     setLoading(true);
     try {
       const params = {};
-
-      if (isInitialLoad === true) {
-        params.start_from_beginning = true;
-      } else if (currentPrompt) {
+      if (currentPrompt) {
         params.current_drum_type = currentPrompt.drum_type;
         params.current_difficulty = currentPrompt.difficulty;
         params.exclude_id = currentPrompt.id;
       }
-
       const { data } = await api.get('/api/prompts/next-in-rotation', { params });
       setCurrentPrompt(data);
       setLlmJson(null);
@@ -273,7 +536,12 @@ export default function TestingPage() {
       setVariations([]);
       resetNotesAndAttachments();
       setNotesPanelOpen(false);
+      setAutoPromptDifficulty(null);
       setStatus('');
+      // Start generation for this single prompt (no pipeline covers it)
+      pregenOne(data, { outputFormat });
+      // Re-fill queue in background
+      fetchBatch([], data.id).then(setPromptQueue);
     } catch (err) {
       setStatus(`Error loading prompt: ${err?.response?.data?.detail || err.message}`);
     } finally {
@@ -281,66 +549,38 @@ export default function TestingPage() {
     }
   };
 
-  const loadRandomPrompt = async () => {
-    setStatus('Loading random prompt...');
-    setLoading(true);
-    try {
-      const params = {};
-      if (currentPrompt) {
-        params.exclude_id = currentPrompt.id;
-      }
-
-      const { data } = await api.get('/api/prompts/random', { params });
-      setCurrentPrompt(data);
-      setLlmJson(null);
-      setLlmResponse(null);
-      setAudioUrl('');
-      setScores({ audio_quality_score: null, llm_accuracy_score: null });
-      setGenerationMeta(null);
-      setVariations([]);
-      resetNotesAndAttachments();
-      setNotesPanelOpen(false);
-      setStatus('');
-    } catch (err) {
-      setStatus(`Error loading random prompt: ${err?.response?.data?.detail || err.message}`);
-    } finally {
-      setLoading(false);
-    }
-  };
-
   const sendPrompt = async () => {
-    // Validate free text mode requirements
     if (freeTextMode) {
       if (!freeText.trim()) {
         setFreeTextError(true);
         setTimeout(() => setFreeTextError(false), 2400);
         return;
       }
-
-      const hasDifficulty = freeTextMetadata.difficulty !== null && freeTextMetadata.difficulty !== undefined;
-      if (!hasDifficulty) {
-        setDifficultyError(true);
-        setTimeout(() => setDifficultyError(false), 2400);
-        return;
-      }
     }
 
     setStatus('Generating loop via ElevenLabs...');
     setLoading(true);
+    // Create an AbortController so skip can cancel this request
+    const abortCtrl = new AbortController();
+    generationAbortRef.current = abortCtrl;
     try {
       const payload = freeTextMode
         ? { text: freeText }
         : { prompt_id: currentPrompt.id };
 
-      payload.bpm = bpm === '' ? null : parseInt(bpm);   // null = auto
-      payload.bars = bars;
-      payload.output_format = outputFormat;
-      if (musicalKey && musicalKey !== 'auto') {
-        payload.key = musicalKey;
+      if (!freeTextMode && currentPrompt) {
+        const derived = getSettingsForPrompt(currentPrompt.text);
+        payload.bpm = derived.bpm;
+        payload.bars = derived.bars;
+        payload.key = derived.key;
+      } else {
+        payload.bpm = bpm === '' ? null : parseInt(bpm);
+        payload.bars = bars;
+        if (musicalKey && musicalKey !== 'auto') payload.key = musicalKey;
       }
-      // key omitted (null) when 'auto' — LLM decides
+      payload.output_format = outputFormat;
 
-      const { data } = await api.post('/api/test/send-prompt', payload);
+      const { data } = await api.post('/api/test/send-prompt', payload, { signal: abortCtrl.signal });
       setLlmJson(data.composition_plan);
       setLlmResponse(data.llm_response || null);
       setAudioUrl(data.audio_url ? `${API_BASE_URL}${data.audio_url}` : '');
@@ -349,6 +589,8 @@ export default function TestingPage() {
       setVariations((data.variations || []).map(v => ({
         audio_id: v.audio_id,
         audio_url: `${API_BASE_URL}${v.audio_url}`,
+        original_audio_id: v.original_audio_id || null,
+        original_audio_url: v.original_audio_url ? `${API_BASE_URL}${v.original_audio_url}` : null,
       })));
       setNoteAttachments([]);
       setNoteAudioFile(null);
@@ -367,6 +609,9 @@ export default function TestingPage() {
       setDifficultyError(false);
       setFreeTextError(false);
     } catch (err) {
+      if (err?.code === 'ERR_CANCELED' || err?.name === 'CanceledError' || abortCtrl.signal.aborted) {
+        return; // Skipped — silently ignore
+      }
       if (err?.response?.status === 502) {
         const detail = err?.response?.data?.detail || 'The generation service is temporarily unavailable.';
         setStatus(`Error: ${detail}`);
@@ -374,7 +619,8 @@ export default function TestingPage() {
         setStatus(`Error: ${err?.response?.data?.detail || err.message || 'An unexpected error occurred'}`);
       }
     } finally {
-      setLoading(false);
+      if (!abortCtrl.signal.aborted) setLoading(false);
+      generationAbortRef.current = null;
     }
   };
 
@@ -384,8 +630,10 @@ export default function TestingPage() {
       return;
     }
 
-    if (freeTextMode && (freeTextMetadata.difficulty === null || freeTextMetadata.difficulty === undefined)) {
-      setStatus('Please set the difficulty before submitting.');
+    const currentDifficulty = freeTextMode ? freeTextMetadata.difficulty : autoPromptDifficulty;
+    if (currentDifficulty === null || currentDifficulty === undefined) {
+      setDifficultyError(true);
+      setTimeout(() => setDifficultyError(false), 2400);
       return;
     }
 
@@ -445,7 +693,6 @@ export default function TestingPage() {
 
       const currentAudioId = audioUrl?.split('/').pop() || null;
 
-      // Build payload
       const payload = {
         llm_accuracy_score: scores.llm_accuracy_score,
         audio_quality_score: scores.audio_quality_score,
@@ -453,6 +700,12 @@ export default function TestingPage() {
         llm_response: llmResponse,
         audio_id: currentAudioId,
         audio_file_path: currentAudioId ? `audio_files/${currentAudioId}.wav` : null,
+        audio_variations: variations.length > 0
+          ? variations.map(v => ({
+              audio_id: v.audio_id,
+              original_audio_id: v.original_audio_id || null,
+            }))
+          : (currentAudioId ? [{ audio_id: currentAudioId }] : null),
         notes: notes.trim() || null,
         notes_audio_path: notesAudioPathValue,
         illugen_attachments: attachmentsPayload.length ? { items: attachmentsPayload } : null,
@@ -460,12 +713,14 @@ export default function TestingPage() {
 
       if (freeTextMode) {
         payload.free_text_prompt = freeText;
-        payload.free_text_difficulty = freeTextMetadata.difficulty;
+        payload.free_text_difficulty = currentDifficulty;
         payload.free_text_category = 'user-generated';
       } else {
         payload.prompt_id = currentPrompt.id;
+        payload.free_text_difficulty = currentDifficulty;
       }
 
+      console.log('[Difficulty Debug] Submitting with free_text_difficulty:', payload.free_text_difficulty, 'currentDifficulty:', currentDifficulty);
       await api.post('/api/results/score', payload);
 
       setStatus('Score saved!');
@@ -654,19 +909,14 @@ export default function TestingPage() {
       <div className="card" style={{ zIndex: 1, overflow: 'visible' }}>
         <div className="flex items-center justify-between" style={{ marginBottom: '16px' }}>
           <h2 style={{ fontSize: '20px', fontWeight: '600', zIndex: 1 }}>Testing Mode</h2>
-          <div style={{ display: 'flex', gap: '10px', alignItems: 'center', zIndex: 1 }}>
-            <button
-              onClick={resetTestingForm}
-              className="btn btn-secondary"
-              style={{ zIndex: 1, background: 'var(--secondary-bg)', border: '1px solid var(--border-color)' }}
-              title="Reset form fields and attachments"
-            >
-              Reset
-            </button>
-            <button onClick={toggleMode} className="btn btn-secondary" style={{ zIndex: 1 }}>
-              {freeTextMode ? '← Database Mode' : 'Free Text Mode'}
-            </button>
-          </div>
+          <button
+            onClick={resetTestingForm}
+            className="btn btn-secondary"
+            style={{ zIndex: 1, background: 'var(--secondary-bg)', border: '1px solid var(--border-color)' }}
+            title="Reset form fields and attachments"
+          >
+            Reset
+          </button>
         </div>
 
         {/* Generation Parameters */}
@@ -680,16 +930,29 @@ export default function TestingPage() {
                 const val = e.target.value;
                 if (val === '') {
                   setBpm('');
-                } else {
-                  const num = parseInt(val);
-                  if (!isNaN(num)) {
-                    setBpm(Math.max(40, Math.min(300, num)));
-                  }
+                } else if (/^\d{0,3}$/.test(val)) {
+                  setBpm(val);
                 }
               }}
+              onBlur={() => {
+                if (bpm !== '') {
+                  const num = parseInt(bpm);
+                  if (isNaN(num) || num < 40) setBpm(40);
+                  else if (num > 300) setBpm(300);
+                  else setBpm(num);
+                }
+              }}
+              onWheel={(e) => {
+                e.preventDefault();
+                const delta = e.deltaY < 0 ? 1 : -1;
+                const current = bpm === '' ? 120 : (parseInt(bpm) || 120);
+                setBpm(Math.max(40, Math.min(300, current + delta)));
+              }}
+              onDoubleClick={(e) => e.target.select()}
               placeholder="Auto"
               className="input"
-              style={{ width: '80px', textAlign: 'center' }}
+              style={{ width: '80px', textAlign: 'center', cursor: 'ns-resize' }}
+              title="Scroll to adjust · Double-click to select · Clear for Auto"
             />
           </div>
 
@@ -761,12 +1024,45 @@ export default function TestingPage() {
         </div>
       </div>
 
-      {/* Prompt Display */}
+      {/* Generate Loop Card — tabbed: Auto Prompt | Free Text */}
       <div className="card" style={{ zIndex: 1 }}>
+
+        {/* Tab strip */}
+        <div style={{ display: 'flex', borderBottom: '1px solid var(--border-color)', marginBottom: '20px' }}>
+          {[
+            { label: 'Auto Prompt', isActive: !freeTextMode },
+            { label: 'Free Text',   isActive:  freeTextMode },
+          ].map(({ label, isActive }) => (
+            <button
+              key={label}
+              onClick={() => {
+                if (label === 'Auto Prompt' && freeTextMode)  toggleMode();
+                if (label === 'Free Text'   && !freeTextMode) toggleMode();
+              }}
+              style={{
+                padding: '8px 20px',
+                background: 'transparent',
+                border: 'none',
+                borderBottom: isActive ? '2px solid var(--primary-color)' : '2px solid transparent',
+                color: isActive ? 'var(--primary-color)' : 'var(--text-secondary)',
+                fontWeight: isActive ? '600' : '400',
+                cursor: 'pointer',
+                fontSize: '14px',
+                transition: 'color 150ms ease, border-color 150ms ease',
+                marginBottom: '-1px',
+                userSelect: 'none',
+              }}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
+
+        {/* ── Free Text tab ── */}
         {freeTextMode ? (
           <div style={{ zIndex: 1 }}>
-            <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr', gap: '32px', alignItems: 'start' }}>
-              {/* Left: Prompt Input */}
+            <div>
+              {/* Prompt textarea */}
               <div>
                 <label className="label" style={{ marginBottom: '8px', display: 'block' }}>
                   {loading ? 'Your prompt:' : 'Enter your prompt:'}
@@ -783,41 +1079,33 @@ export default function TestingPage() {
                     minHeight: '60px',
                     display: 'flex',
                     alignItems: 'flex-start',
-                    paddingTop: '16px'
                   }}>
                     {loading && freeText ? (
                       <span>
                         {freeText.split('').map((char, index) => (
-                          <span
-                            key={index}
-                            style={{
-                              display: 'inline-block',
-                              animation: `floatUp 3s ease-in-out infinite`,
-                              animationDelay: `${index * 0.05}s`,
-                              whiteSpace: char === ' ' ? 'pre' : 'normal'
-                            }}
-                          >
-                            {char}
-                          </span>
+                          <span key={index} style={{
+                            display: 'inline-block',
+                            animationName: 'floatUp',
+                            animationDuration: '3s',
+                            animationTimingFunction: 'ease-in-out',
+                            animationIterationCount: 'infinite',
+                            animationDelay: `${index * 0.05}s`,
+                            whiteSpace: char === ' ' ? 'pre' : 'normal'
+                          }}>{char}</span>
                         ))}
                       </span>
                     ) : wasGenerating && freeText ? (
                       <span>
                         {freeText.split('').map((char, index) => (
-                          <span
-                            key={index}
-                            style={{
-                              display: 'inline-block',
-                              animationName: 'dropDown',
-                              animationDuration: '0.6s',
-                              animationTimingFunction: 'cubic-bezier(0.68, -0.55, 0.265, 1.55)',
-                              animationDelay: `${index * 0.02}s`,
-                              animationFillMode: 'backwards',
-                              whiteSpace: char === ' ' ? 'pre' : 'normal'
-                            }}
-                          >
-                            {char}
-                          </span>
+                          <span key={index} style={{
+                            display: 'inline-block',
+                            animationName: 'dropDown',
+                            animationDuration: '0.6s',
+                            animationTimingFunction: 'cubic-bezier(0.68, -0.55, 0.265, 1.55)',
+                            animationDelay: `${index * 0.02}s`,
+                            animationFillMode: 'backwards',
+                            whiteSpace: char === ' ' ? 'pre' : 'normal'
+                          }}>{char}</span>
                         ))}
                       </span>
                     ) : null}
@@ -825,11 +1113,8 @@ export default function TestingPage() {
                 ) : (
                   <textarea
                     value={freeText}
-                    onChange={(e) => {
-                      setFreeText(e.target.value);
-                      setFreeTextError(false);
-                    }}
-                    placeholder="Describe the loop you want... (e.g., 'solo 808 bass, dark trap', 'jazzy Rhodes chords', 'punchy boom bap drums')"
+                    onChange={(e) => { setFreeText(e.target.value); setFreeTextError(false); }}
+                    placeholder="Describe the loop you want… e.g. 'solo 808 bass, dark trap' · 'jazzy Rhodes chords' · 'punchy boom bap drums'"
                     rows={2}
                     className={`input ${freeTextError ? 'flash-error-active' : ''}`}
                     style={{
@@ -851,123 +1136,57 @@ export default function TestingPage() {
                 )}
               </div>
 
-              {/* Right: Difficulty */}
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '20px', alignItems: 'stretch', paddingTop: '28px' }}>
-                <div style={{ zIndex: 1 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: '85px', justifyContent: 'flex-end' }}>
-                      <label className="label" style={{ margin: 0, fontSize: '14px', fontWeight: '600', color: 'var(--text-primary)', textAlign: 'right' }}>
-                        Difficulty:
-                      </label>
-                      <div
-                        style={{
-                          position: 'relative',
-                          cursor: 'pointer',
-                          zIndex: 1100
-                        }}
-                        onMouseEnter={() => setShowDifficultyTooltip(true)}
-                        onMouseLeave={() => setShowDifficultyTooltip(false)}
-                      >
-                        <span style={{
-                          fontSize: '12px',
-                          color: 'var(--primary-color)',
-                          border: '1px solid var(--primary-color)',
-                          borderRadius: '50%',
-                          width: '16px',
-                          height: '16px',
-                          display: 'inline-flex',
-                          alignItems: 'center',
-                          justifyContent: 'center',
-                          background: 'var(--primary-bg)',
-                          fontWeight: '600'
-                        }}>i</span>
-                        {showDifficultyTooltip && (
-                          <div style={{
-                            position: 'absolute',
-                            top: '0',
-                            right: '120%',
-                            background: 'var(--secondary-bg)',
-                            border: '1px solid var(--border-color)',
-                            borderRadius: '8px',
-                            padding: '12px',
-                            width: '240px',
-                            boxShadow: '0 8px 20px rgba(0,0,0,0.4)',
-                            fontSize: '12px',
-                            lineHeight: '1.5',
-                            zIndex: 3000,
-                            whiteSpace: 'normal'
-                          }}>
-                            <div style={{ fontWeight: '600', marginBottom: '6px', color: 'var(--primary-color)' }}>
-                              Difficulty Rating
-                            </div>
-                            <div style={{ color: 'var(--text-secondary)' }}>
-                              Set how difficult you believe this prompt is for the model to generate. This helps weight the scoring appropriately.
-                            </div>
-                          </div>
-                        )}
-                      </div>
-                    </div>
-                    <div style={{ flex: 1 }}>
-                      <DifficultySlider
-                        value={freeTextMetadata.difficulty}
-                        onChange={(value) => {
-                          setFreeTextMetadata({ ...freeTextMetadata, difficulty: value });
-                          setDifficultyError(false);
-                        }}
-                        showError={difficultyError}
-                      />
-                    </div>
-                  </div>
-                </div>
-              </div>
             </div>
           </div>
+
         ) : (
-          currentPrompt && (
+          /* ── Auto Prompt tab ── */
+          currentPrompt ? (
             <div style={{ zIndex: 1 }}>
+              {/* Pre-generation progress */}
+              {pregenTotal > 0 && pregenReadyCount < pregenTotal && (
+                <div style={{
+                  display: 'flex', alignItems: 'center', gap: '10px',
+                  marginBottom: '12px', padding: '8px 14px',
+                  borderRadius: '8px', background: 'rgba(124,58,237,0.08)',
+                  border: '1px solid rgba(124,58,237,0.2)', fontSize: '13px',
+                }}>
+                  <div style={{
+                    flex: 1, height: '4px', borderRadius: '2px',
+                    background: 'var(--border-color)', overflow: 'hidden',
+                  }}>
+                    <div style={{
+                      width: `${(pregenReadyCount / pregenTotal) * 100}%`,
+                      height: '100%', borderRadius: '2px',
+                      background: 'var(--primary-color)',
+                      transition: 'width 300ms ease',
+                    }} />
+                  </div>
+                  <span style={{ color: 'var(--text-secondary)', whiteSpace: 'nowrap' }}>
+                    Pre-generating {pregenReadyCount}/{pregenTotal} loops
+                  </span>
+                </div>
+              )}
+
               <div className="flex items-center justify-between mb-4">
                 <div>
                   <label className="label">Current Prompt:</label>
                   <span className="text-secondary" style={{ fontSize: '13px', marginLeft: '12px' }}>
-                    Difficulty: {currentPrompt.difficulty}/10 | Category: {currentPrompt.category || 'N/A'} | Type: {currentPrompt.drum_type || 'N/A'}
+                    Category: {currentPrompt.category || 'N/A'} | Type: {currentPrompt.drum_type || 'N/A'}
                   </span>
                 </div>
-                <div style={{ display: 'flex', gap: '8px' }}>
-                  <button
-                    onClick={handleEditPrompt}
-                    className="btn btn-secondary"
-                    disabled={loading || editMode}
-                    style={{ zIndex: 1, fontSize: '13px', padding: '6px 12px' }}
-                  >
-                    Edit
-                  </button>
-                  <button
-                    onClick={() => setShowDeleteConfirm(true)}
-                    className="btn btn-secondary"
-                    disabled={loading || editMode}
-                    style={{ zIndex: 1, fontSize: '13px', padding: '6px 12px', background: 'var(--error-color)', borderColor: 'var(--error-color)' }}
-                  >
-                    Delete
-                  </button>
-                  <button
-                    onClick={() => loadNextPrompt()}
-                    className="btn btn-secondary"
-                    disabled={loading || editMode}
-                    style={{ zIndex: 1 }}
-                  >
-                    Next Prompt
-                  </button>
+                <div style={{ display: 'flex', gap: '8px', alignItems: 'center' }}>
+                  <span style={{ fontSize: '12px', color: 'var(--text-secondary)', whiteSpace: 'nowrap' }} title="Prompts pre-loaded in queue">
+                    {promptQueue.length} in queue
+                  </span>
+                  <button onClick={handleEditPrompt} className="btn btn-secondary" disabled={loading || editMode} style={{ zIndex: 1, fontSize: '13px', padding: '6px 12px' }}>Edit</button>
+                  <button onClick={() => setShowDeleteConfirm(true)} className="btn btn-secondary" disabled={loading || editMode} style={{ zIndex: 1, fontSize: '13px', padding: '6px 12px', background: 'var(--error-color)', borderColor: 'var(--error-color)' }}>Delete</button>
+                  <button onClick={() => loadNextPrompt()} className="btn btn-secondary" disabled={editMode || submitting} style={{ zIndex: 1 }}>Skip Prompt</button>
                 </div>
               </div>
 
               {editMode ? (
-                <div style={{
-                  padding: '16px',
-                  background: 'var(--secondary-bg)',
-                  borderRadius: '8px',
-                  border: '2px solid var(--primary-color)',
-                  zIndex: 1
-                }}>
+                <div style={{ padding: '16px', background: 'var(--secondary-bg)', borderRadius: '8px', border: '2px solid var(--primary-color)', zIndex: 1 }}>
                   <div style={{ marginBottom: '16px' }}>
                     <label className="label" style={{ marginBottom: '8px', display: 'block' }}>Prompt Text:</label>
                     <textarea
@@ -978,22 +1197,9 @@ export default function TestingPage() {
                       style={{ width: '100%', fontFamily: 'inherit', resize: 'vertical' }}
                     />
                   </div>
-
                   <div style={{ display: 'flex', gap: '8px', justifyContent: 'flex-end' }}>
-                    <button
-                      onClick={handleCancelEdit}
-                      className="btn btn-secondary"
-                      disabled={loading}
-                    >
-                      Cancel
-                    </button>
-                    <button
-                      onClick={handleSaveEdit}
-                      className="btn btn-primary"
-                      disabled={loading}
-                    >
-                      {loading ? 'Saving...' : 'Save Changes'}
-                    </button>
+                    <button onClick={handleCancelEdit} className="btn btn-secondary" disabled={loading}>Cancel</button>
+                    <button onClick={handleSaveEdit} className="btn btn-primary" disabled={loading}>{loading ? 'Saving…' : 'Save Changes'}</button>
                   </div>
                 </div>
               ) : (
@@ -1005,95 +1211,46 @@ export default function TestingPage() {
                   lineHeight: '1.6',
                   border: '1px solid var(--border-color)',
                   zIndex: 1,
-                  position: 'relative'
+                  minHeight: '60px',
+                  position: 'relative',
                 }}>
-                  {/* Random button in top right corner */}
-                  <button
-                    onClick={(e) => {
-                      if (!loading && !editMode) {
-                        e.currentTarget.style.transform = 'scale(0.95) rotate(-15deg)';
-                        setTimeout(() => {
-                          e.currentTarget.style.transform = 'scale(1) rotate(0deg)';
-                        }, 150);
-                        loadRandomPrompt();
-                      }
-                    }}
-                    disabled={loading || editMode}
-                    style={{
-                      position: 'absolute',
-                      top: '8px',
-                      right: '8px',
-                      zIndex: 2,
-                      fontSize: '20px',
-                      padding: '6px 8px',
-                      background: 'transparent',
-                      border: 'none',
-                      cursor: loading || editMode ? 'not-allowed' : 'pointer',
-                      opacity: loading || editMode ? 0.4 : 1,
-                      transition: 'all 0.2s ease',
-                      display: 'flex',
-                      alignItems: 'center',
-                      justifyContent: 'center',
-                      minWidth: '36px',
-                      minHeight: '36px'
-                    }}
-                    onMouseEnter={(e) => {
-                      if (!loading && !editMode) {
-                        e.currentTarget.style.transform = 'scale(1.1) rotate(15deg)';
-                      }
-                    }}
-                    onMouseLeave={(e) => {
-                      e.currentTarget.style.transform = 'scale(1) rotate(0deg)';
-                    }}
-                    title="Load a random prompt from the database"
-                  >
-                    🎲
-                  </button>
-                  {loading && currentPrompt?.text ? (
-                    <span>
-                      {currentPrompt.text.split('').map((char, index) => (
-                        <span
-                          key={index}
-                          style={{
-                            display: 'inline-block',
-                            animation: `floatUp 3s ease-in-out infinite`,
-                            animationDelay: `${index * 0.05}s`,
-                            whiteSpace: char === ' ' ? 'pre' : 'normal'
-                          }}
-                        >
-                          {char}
-                        </span>
-                      ))}
-                    </span>
-                  ) : wasGenerating && currentPrompt?.text ? (
-                    <span>
-                      {currentPrompt.text.split('').map((char, index) => (
-                        <span
-                          key={index}
-                          style={{
-                            display: 'inline-block',
-                            animationName: 'dropDown',
-                            animationDuration: '0.6s',
-                            animationTimingFunction: 'cubic-bezier(0.68, -0.55, 0.265, 1.55)',
-                            animationDelay: `${index * 0.02}s`,
-                            animationFillMode: 'backwards',
-                            whiteSpace: char === ' ' ? 'pre' : 'normal'
-                          }}
-                        >
-                          {char}
-                        </span>
-                      ))}
-                    </span>
-                  ) : (
-                    currentPrompt?.text || ''
+                  {currentPrompt?.text || ''}
+
+                  {/* Generating overlay — shown when current prompt has no results yet */}
+                  {!llmJson && !audioUrl && (
+                    <div style={{
+                      position: 'absolute', inset: 0,
+                      background: 'rgba(var(--secondary-bg-rgb, 30,30,30), 0.7)',
+                      backdropFilter: 'blur(2px)',
+                      borderRadius: '8px',
+                      display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px',
+                      fontSize: '14px', color: 'var(--primary-color)', fontWeight: '500',
+                    }}>
+                      <div style={{
+                        width: '18px', height: '18px',
+                        border: '2px solid var(--border-color)',
+                        borderTopColor: 'var(--primary-color)',
+                        borderRadius: '50%',
+                        animationName: 'spin',
+                        animationDuration: '0.8s',
+                        animationTimingFunction: 'linear',
+                        animationIterationCount: 'infinite',
+                      }} />
+                      Generating…
+                    </div>
                   )}
                 </div>
               )}
             </div>
+          ) : (
+            <div style={{ color: 'var(--text-secondary)', padding: '8px 0 16px', fontSize: '15px' }}>
+              No prompts in the database yet. Switch to the <strong>Free Text</strong> tab to generate a loop, or add prompts to the prompt bank.
+            </div>
           )
         )}
 
-        <div style={{ display: 'flex', gap: '10px', marginTop: '16px' }}>
+        {/* Generate Loop button — Free Text only (Auto Prompt pre-generates) */}
+        <div style={{ display: freeTextMode ? 'flex' : 'none', gap: '10px', marginTop: '20px' }}>
           <button
             onClick={sendPrompt}
             disabled={loading || (!freeTextMode && !currentPrompt)}
@@ -1123,17 +1280,13 @@ export default function TestingPage() {
               }
             }}
             onMouseDown={(e) => {
-              if (!loading && (freeTextMode || currentPrompt)) {
-                e.currentTarget.style.transform = 'translateY(0)';
-              }
+              if (!loading && (freeTextMode || currentPrompt)) e.currentTarget.style.transform = 'translateY(0)';
             }}
             onMouseUp={(e) => {
-              if (!loading && (freeTextMode || currentPrompt)) {
-                e.currentTarget.style.transform = 'translateY(-2px)';
-              }
+              if (!loading && (freeTextMode || currentPrompt)) e.currentTarget.style.transform = 'translateY(-2px)';
             }}
           >
-            {loading ? 'Generating...' : 'Generate Loop'}
+            {loading ? 'Generating…' : 'Generate Loop'}
           </button>
         </div>
       </div>
@@ -1141,18 +1294,37 @@ export default function TestingPage() {
       {/* Results Section - Only show after sending */}
       {(llmJson || audioUrl) && (
         <>
-          {/* Composition Plan Output */}
+          {/* Generation Results Header */}
           <div className="card" style={{ zIndex: 1 }}>
-            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '12px' }}>
-              <h3 className="label" style={{ fontSize: '18px', margin: 0, zIndex: 1 }}>
-                Composition Plan
-              </h3>
-              {generationMeta && (
-                <span className="text-secondary" style={{ fontSize: '13px' }}>
-                  {generationMeta.bpm} BPM | {generationMeta.bars} bars | {generationMeta.key || 'No key'} | {(generationMeta.duration_ms / 1000).toFixed(1)}s | API: {(generationMeta.api_time_ms / 1000).toFixed(1)}s
-                </span>
-              )}
-            </div>
+            {generationMeta && (
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px', alignItems: 'center', marginBottom: '16px' }}>
+                {[
+                  { label: 'BPM',      value: generationMeta.bpm },
+                  { label: 'Key',      value: generationMeta.key || 'None' },
+                  { label: 'Bars',     value: generationMeta.bars },
+                  { label: 'Duration', value: `${(generationMeta.duration_ms / 1000).toFixed(1)}s` },
+                  { label: 'API Time', value: `${(generationMeta.api_time_ms / 1000).toFixed(1)}s` },
+                ].map(({ label, value }) => (
+                  <div key={label} style={{
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    padding: '6px 14px',
+                    borderRadius: '20px',
+                    background: 'var(--secondary-bg)',
+                    border: '1px solid var(--border-color)',
+                    fontSize: '14px',
+                  }}>
+                    <span style={{ color: 'var(--text-secondary)', fontWeight: '500' }}>{label}</span>
+                    <span style={{ color: 'var(--text-primary)', fontWeight: '600' }}>{value}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+
+            <h3 className="label" style={{ fontSize: '16px', margin: 0, marginBottom: '8px', zIndex: 1 }}>
+              Composition Plan
+            </h3>
             <JsonViewer data={llmJson} />
           </div>
 
@@ -1246,7 +1418,10 @@ export default function TestingPage() {
                       borderRadius: '50%',
                       background: ['#8247ff', '#54d0ff', '#ff6b9d', '#ffd93d'][i],
                       transform: `translate(-50%, -50%) rotate(${i * 90}deg) translateY(-70px)`,
-                      animation: `orbit 2s linear infinite`,
+                      animationName: 'orbit',
+                      animationDuration: '2s',
+                      animationTimingFunction: 'linear',
+                      animationIterationCount: 'infinite',
                       animationDelay: `${i * 0.5}s`,
                       boxShadow: `0 0 15px ${['#8247ff', '#54d0ff', '#ff6b9d', '#ffd93d'][i]}`
                     }}
@@ -1281,14 +1456,25 @@ export default function TestingPage() {
                   <h3 className="label" style={{ fontSize: '16px', marginBottom: '10px', zIndex: 1 }}>
                     Generated Audio
                   </h3>
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: '18px' }}>
                     {variations.length > 1 ? (
                       variations.map((v, idx) => (
                         <div key={v.audio_id}>
-                          <div style={{ fontSize: '13px', color: 'var(--text-secondary)', marginBottom: '6px' }}>
+                          <div style={{ fontSize: '13px', fontWeight: '600', color: 'var(--text-primary)', marginBottom: '6px' }}>
                             Variation {idx + 1}
                           </div>
-                          <AudioPlayer src={v.audio_url} />
+                          <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                            <div>
+                              <div style={{ fontSize: '11px', color: 'var(--primary-color)', marginBottom: '3px', fontWeight: '500' }}>Loop (crossfaded)</div>
+                              <AudioPlayer src={v.audio_url} />
+                            </div>
+                            {v.original_audio_url && (
+                              <div>
+                                <div style={{ fontSize: '11px', color: 'var(--text-secondary)', marginBottom: '3px', fontWeight: '500' }}>Original (pre-crossfade)</div>
+                                <AudioPlayer src={v.original_audio_url} loop={false} />
+                              </div>
+                            )}
+                          </div>
                         </div>
                       ))
                     ) : (
@@ -1315,6 +1501,16 @@ export default function TestingPage() {
                     }}
                     generationError={generationScoreError}
                     llmError={llmScoreError}
+                    difficultyValue={freeTextMode ? freeTextMetadata.difficulty : autoPromptDifficulty}
+                    onDifficultyChange={(val) => {
+                      if (freeTextMode) {
+                        setFreeTextMetadata({ ...freeTextMetadata, difficulty: val });
+                      } else {
+                        setAutoPromptDifficulty(val);
+                      }
+                      setDifficultyError(false);
+                    }}
+                    difficultyError={difficultyError}
                   />
                 </div>
               </div>

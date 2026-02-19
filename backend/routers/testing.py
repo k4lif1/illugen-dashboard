@@ -36,6 +36,8 @@ class SendPromptRequest(BaseModel):
 class VariationResult(BaseModel):
     audio_id: str
     audio_url: str
+    original_audio_id: Optional[str] = None
+    original_audio_url: Optional[str] = None
 
 
 class SendPromptResponse(BaseModel):
@@ -62,17 +64,27 @@ async def get_music_client():
         await client.close()
 
 
-async def _generate_and_save(client: ElevenLabsMusicClient, composition_plan: dict, output_format: str) -> tuple[str, str, int]:
-    """Generate audio, process it, save to disk. Returns (audio_id, audio_url, api_time_ms)."""
+async def _generate_and_save(client: ElevenLabsMusicClient, composition_plan: dict, output_format: str) -> dict:
+    """Generate audio, save crossfaded loop version.
+
+    Returns dict with audio_id, audio_url, api_time_ms.
+    Original (non-crossfaded) audio is not saved since no key
+    transposition is applied — it would be redundant.
+    """
     raw_audio, api_time_ms = await client.generate_audio(composition_plan, output_format)
-    wav_data = client.process_audio(raw_audio, output_format)
+    loop_wav = client.process_audio(raw_audio, output_format)
 
-    audio_id = str(uuid.uuid4())
-    audio_file_path = AUDIO_DIR / f"{audio_id}.wav"
-    with open(audio_file_path, "wb") as f:
-        f.write(wav_data)
+    loop_id = str(uuid.uuid4())
+    with open(AUDIO_DIR / f"{loop_id}.wav", "wb") as f:
+        f.write(loop_wav)
 
-    return audio_id, f"/api/audio/{audio_id}", api_time_ms
+    return {
+        "audio_id": loop_id,
+        "audio_url": f"/api/audio/{loop_id}",
+        "original_audio_id": None,
+        "original_audio_url": None,
+        "api_time_ms": api_time_ms,
+    }
 
 
 @router.post("/send-prompt", response_model=SendPromptResponse, summary="Generate loop via ElevenLabs")
@@ -138,12 +150,16 @@ async def send_prompt(
             detail=f"ElevenLabs audio generation failed: {e}"
         ) from e
 
-    # First result is the "primary", both go into variations
-    primary_id, primary_url, primary_api_ms = results[0]
-    max_api_ms = max(r[2] for r in results)
+    primary = results[0]
+    max_api_ms = max(r["api_time_ms"] for r in results)
 
     variations = [
-        VariationResult(audio_id=r[0], audio_url=r[1])
+        VariationResult(
+            audio_id=r["audio_id"],
+            audio_url=r["audio_url"],
+            original_audio_id=r["original_audio_id"],
+            original_audio_url=r["original_audio_url"],
+        )
         for r in results
     ]
 
@@ -155,8 +171,8 @@ async def send_prompt(
         difficulty=difficulty_val,
         composition_plan=composition_plan,
         llm_response=raw_llm_text,
-        audio_id=primary_id,
-        audio_url=primary_url,
+        audio_id=primary["audio_id"],
+        audio_url=primary["audio_url"],
         variations=variations,
         bpm=final_bpm,
         bars=payload.bars,

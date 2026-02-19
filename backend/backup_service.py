@@ -1,6 +1,6 @@
 """
 Database and Audio Files Backup Service
-Runs in the FastAPI backend server - keeps 2 backups rotating every 12 hours
+Runs in the FastAPI backend server - daily backups with 14-day retention
 """
 import os
 import shutil
@@ -17,9 +17,9 @@ PROJECT_ROOT = Path(__file__).parent.parent
 DB_FILE = PROJECT_ROOT / "drumgen.db"
 AUDIO_DIR = PROJECT_ROOT / "audio_files"
 ILLUGEN_AUDIO_DIR = PROJECT_ROOT / "illugen_audio"
+NOTE_ATTACHMENTS_DIR = PROJECT_ROOT / "note_attachments"
 BACKUP_ROOT = PROJECT_ROOT / "backups"
 
-# Keep 14 backups (~7 days at 12-hour interval)
 MAX_BACKUPS = 14
 
 
@@ -51,7 +51,7 @@ def create_backup():
         else:
             logger.warning(f"⚠️  audio_files directory not found: {AUDIO_DIR}")
         
-        # 3. Backup illugen_audio directory (contains note attachments)
+        # 3. Backup illugen_audio directory
         if ILLUGEN_AUDIO_DIR.exists():
             illugen_backup = backup_dir / "illugen_audio"
             shutil.copytree(ILLUGEN_AUDIO_DIR, illugen_backup, dirs_exist_ok=True)
@@ -60,13 +60,23 @@ def create_backup():
         else:
             logger.warning(f"⚠️  illugen_audio directory not found: {ILLUGEN_AUDIO_DIR}")
         
-        # 4. Create backup info file
+        # 4. Backup note_attachments directory
+        if NOTE_ATTACHMENTS_DIR.exists():
+            notes_backup = backup_dir / "note_attachments"
+            shutil.copytree(NOTE_ATTACHMENTS_DIR, notes_backup, dirs_exist_ok=True)
+            notes_count = len(list(notes_backup.rglob("*")))
+            logger.info(f"✓ Note attachments backed up: {notes_count} items")
+        else:
+            logger.warning(f"⚠️  note_attachments directory not found: {NOTE_ATTACHMENTS_DIR}")
+        
+        # 5. Create backup info file
         info_file = backup_dir / "backup_info.txt"
         with open(info_file, 'w') as f:
             f.write(f"Backup created: {timestamp}\n")
             f.write(f"Database: {DB_FILE}\n")
             f.write(f"Audio files: {AUDIO_DIR}\n")
             f.write(f"Illugen audio: {ILLUGEN_AUDIO_DIR}\n")
+            f.write(f"Note attachments: {NOTE_ATTACHMENTS_DIR}\n")
         
         logger.info(f"✅ BACKUP COMPLETE: {backup_dir}")
         

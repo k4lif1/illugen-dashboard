@@ -41,6 +41,7 @@ class TestResult(Base):
     llm_response: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     audio_id: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     audio_file_path: Mapped[Optional[str]] = mapped_column(String, nullable=True)
+    audio_variations: Mapped[Optional[dict[str, Any]]] = mapped_column(JSON, nullable=True)
     model_version: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     notes_audio_path: Mapped[Optional[str]] = mapped_column(String, nullable=True)
     illugen_generation_id: Mapped[Optional[int]] = mapped_column(
@@ -160,6 +161,7 @@ class TestResultCreate(BaseModel):
     llm_response: Optional[str] = None
     audio_id: Optional[str] = None
     audio_file_path: Optional[str] = None
+    audio_variations: Optional[list[dict[str, Any]]] = None
     model_version: Optional[str] = None
     notes: Optional[str] = None
     notes_audio_path: Optional[str] = None
@@ -185,6 +187,7 @@ class TestResultRead(BaseModel):
     llm_response: Optional[str]
     audio_id: Optional[str]
     audio_file_path: Optional[str]
+    audio_variations: Optional[list[dict[str, Any]]]
     model_version: Optional[str]
     notes_audio_path: Optional[str]
     illugen_generation_id: Optional[int]

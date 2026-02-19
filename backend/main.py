@@ -86,9 +86,10 @@ async def init_models() -> None:
             await conn.execute(text("ALTER TABLE test_results ADD COLUMN illugen_generation_id INTEGER"))
         if "illugen_attachments" not in columns:
             await conn.execute(text("ALTER TABLE test_results ADD COLUMN illugen_attachments JSON"))
-        # Add generation_score column (nullable) for N/A option
         if "generation_score" not in columns:
             await conn.execute(text("ALTER TABLE test_results ADD COLUMN generation_score REAL"))
+        if "audio_variations" not in columns:
+            await conn.execute(text("ALTER TABLE test_results ADD COLUMN audio_variations JSON"))
         
         # Check if llm_failures table exists
         result = await conn.execute(text("""
@@ -122,8 +123,8 @@ async def init_models() -> None:
 async def on_startup() -> None:
     await init_models()
 
-    # Start backup service every 12 hours (43200 seconds)
-    start_backup_scheduler(interval_seconds=43200)
+    # Daily backups (86400 seconds = 24 hours)
+    start_backup_scheduler(interval_seconds=86400)
     
     # Clean up orphaned audio files on startup
     async with async_session_maker() as session:
@@ -160,7 +161,8 @@ async def serve_audio(audio_id: str):
 @app.get("/api/illugen/audio/{request_id}/{filename}")
 async def serve_illugen_audio(request_id: str, filename: str):
     """Serve locally stored Illugen audio files."""
-    audio_path = Path(f"./illugen_audio/{request_id}/{filename}")
+    project_root = Path(__file__).resolve().parent.parent
+    audio_path = project_root / "illugen_audio" / request_id / filename
     if not audio_path.exists():
         raise HTTPException(status_code=404, detail="Illugen audio file not found")
     return FileResponse(audio_path, media_type="audio/wav")

@@ -1,9 +1,10 @@
 import React, { useRef, useEffect, useState } from 'react';
 
-export default function ScoringSliders({ scores, onChange, generationError = false, llmError = false }) {
+export default function ScoringSliders({ scores, onChange, generationError = false, llmError = false, difficultyValue = null, onDifficultyChange = null, difficultyError = false }) {
   const genScoreRef = useRef(null);
   const llmScoreRef = useRef(null);
-  const [isDragging, setIsDragging] = useState(null); // 'gen' or 'llm' or null
+  const diffScoreRef = useRef(null);
+  const [isDragging, setIsDragging] = useState(null); // 'gen' or 'llm' or 'diff' or null
   const [dragStartY, setDragStartY] = useState(0);
   const [dragStartValue, setDragStartValue] = useState(0);
 
@@ -29,25 +30,29 @@ export default function ScoringSliders({ scores, onChange, generationError = fal
       onChange({ ...scores, llm_accuracy_score: newValue });
     };
 
+    const handleWheelDiff = (e) => {
+      if (!onDifficultyChange) return;
+      e.preventDefault();
+      e.stopPropagation();
+      const currentValue = difficultyValue ?? 1;
+      const delta = e.deltaY > 0 ? -1 : 1;
+      onDifficultyChange(Math.max(1, Math.min(10, currentValue + delta)));
+    };
+
     const genElement = genScoreRef.current;
     const llmElement = llmScoreRef.current;
+    const diffElement = diffScoreRef.current;
 
-    if (genElement) {
-      genElement.addEventListener('wheel', handleWheelGen, { passive: false });
-    }
-    if (llmElement) {
-      llmElement.addEventListener('wheel', handleWheelLLM, { passive: false });
-    }
+    if (genElement) genElement.addEventListener('wheel', handleWheelGen, { passive: false });
+    if (llmElement) llmElement.addEventListener('wheel', handleWheelLLM, { passive: false });
+    if (diffElement) diffElement.addEventListener('wheel', handleWheelDiff, { passive: false });
 
     return () => {
-      if (genElement) {
-        genElement.removeEventListener('wheel', handleWheelGen);
-      }
-      if (llmElement) {
-        llmElement.removeEventListener('wheel', handleWheelLLM);
-      }
+      if (genElement) genElement.removeEventListener('wheel', handleWheelGen);
+      if (llmElement) llmElement.removeEventListener('wheel', handleWheelLLM);
+      if (diffElement) diffElement.removeEventListener('wheel', handleWheelDiff);
     };
-  }, [scores, onChange]);
+  }, [scores, onChange, difficultyValue, onDifficultyChange]);
 
   const handleChange = (key, value) => {
     // Handle empty string or null
@@ -94,6 +99,8 @@ export default function ScoringSliders({ scores, onChange, generationError = fal
         onChange({ ...scores, audio_quality_score: newValue });
       } else if (isDragging === 'llm') {
         onChange({ ...scores, llm_accuracy_score: newValue });
+      } else if (isDragging === 'diff' && onDifficultyChange) {
+        onDifficultyChange(newValue);
       }
     };
 
@@ -119,6 +126,44 @@ export default function ScoringSliders({ scores, onChange, generationError = fal
   return (
     <div>
       <div style={{ display: 'flex', gap: '16px', justifyContent: 'center' }}>
+        {/* Prompt Difficulty */}
+        {onDifficultyChange && (
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
+            <label className="label" style={{ margin: 0, fontSize: '12px', marginBottom: '6px' }}>
+              Prompt Difficulty
+            </label>
+            <div
+              ref={diffScoreRef}
+              className={`scroll-wheel-input-compact ${difficultyError ? 'flash-error-active' : ''}`}
+              onMouseDown={(e) => handleMouseDown(e, 'diff', difficultyValue ?? 1)}
+              onDoubleClick={(e) => handleDoubleClick(e, diffScoreRef)}
+              style={{
+                cursor: isDragging === 'diff' ? 'ns-resize' : 'pointer',
+                ...(difficultyError ? {
+                  borderColor: 'var(--secondary-color)',
+                  borderWidth: '2px',
+                  backgroundColor: 'rgba(199, 155, 255, 0.08)'
+                } : {})
+              }}
+            >
+              <input
+                type="number"
+                min="1"
+                max="10"
+                value={difficultyValue ?? ''}
+                placeholder="-"
+                onChange={(e) => {
+                  const v = e.target.value;
+                  if (v === '' || v === null) { onDifficultyChange(null); return; }
+                  onDifficultyChange(Math.max(1, Math.min(10, Number(v) || 1)));
+                }}
+                className="score-input-compact score-input-drag-mode"
+              />
+              <div className="score-label-compact">/10</div>
+            </div>
+          </div>
+        )}
+
         {/* Generation Score */}
         <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center' }}>
           <label className="label" style={{ margin: 0, fontSize: '12px', marginBottom: '6px' }}>

@@ -90,20 +90,28 @@ async def get_next_prompt_in_rotation(
     5. Exclude a specific prompt ID to avoid repeats when skipping
     6. If start_from_beginning=True, always start from first drum type at difficulty 1
     """
-    # Get all drum types ordered alphabetically
+    # Get all drum types ordered alphabetically (include None as a valid group)
     drum_types_result = await session.execute(
         select(Prompt.drum_type).where(
             Prompt.is_user_generated == False
         ).distinct().order_by(Prompt.drum_type)
     )
-    drum_types = [dt for dt in drum_types_result.scalars().all() if dt]
+    drum_types = list(drum_types_result.scalars().all())
     
     if not drum_types:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No prompts available")
     
-    # Get the global minimum used_count
+    # IDs of prompts that already have at least one test result — never reuse
+    scored_ids_q = select(TestResult.prompt_id).distinct()
+    scored_result = await session.execute(scored_ids_q)
+    scored_ids = {row[0] for row in scored_result.all()}
+
+    # Get the global minimum used_count among un-scored prompts
+    unscored_filter = Prompt.is_user_generated == False
+    if scored_ids:
+        unscored_filter = (Prompt.is_user_generated == False) & (Prompt.id.notin_(scored_ids))
     min_used_result = await session.execute(
-        select(func.min(Prompt.used_count)).where(Prompt.is_user_generated == False)
+        select(func.min(Prompt.used_count)).where(unscored_filter)
     )
     min_used = min_used_result.scalar() or 0
     
@@ -138,15 +146,25 @@ async def get_next_prompt_in_rotation(
         drum_type = drum_types[next_drum_idx]
         difficulty = next_difficulty
         
-        stmt = select(Prompt).where(
-            Prompt.drum_type == drum_type,
-            Prompt.difficulty == difficulty,
-            Prompt.is_user_generated == False,
-            Prompt.used_count == min_used
-        )
+        if drum_type is None:
+            stmt = select(Prompt).where(
+                Prompt.drum_type.is_(None),
+                Prompt.difficulty == difficulty,
+                Prompt.is_user_generated == False,
+                Prompt.used_count == min_used
+            )
+        else:
+            stmt = select(Prompt).where(
+                Prompt.drum_type == drum_type,
+                Prompt.difficulty == difficulty,
+                Prompt.is_user_generated == False,
+                Prompt.used_count == min_used
+            )
         
         if exclude_id is not None:
             stmt = stmt.where(Prompt.id != exclude_id)
+        if scored_ids:
+            stmt = stmt.where(Prompt.id.notin_(scored_ids))
         
         stmt = stmt.order_by(func.random()).limit(1)
         
@@ -165,13 +183,15 @@ async def get_next_prompt_in_rotation(
         
         attempts += 1
     
-    # Fallback: get any prompt with lowest usage
+    # Fallback: get any un-scored prompt with lowest usage
     stmt = select(Prompt).where(
         Prompt.is_user_generated == False
     )
     
     if exclude_id is not None:
         stmt = stmt.where(Prompt.id != exclude_id)
+    if scored_ids:
+        stmt = stmt.where(Prompt.id.notin_(scored_ids))
     
     stmt = stmt.order_by(Prompt.used_count, func.random()).limit(1)
     
@@ -182,6 +202,33 @@ async def get_next_prompt_in_rotation(
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="No prompts available")
     
     return PromptRead.model_validate(prompt)
+
+
+@router.get("/batch", response_model=List[PromptRead], summary="Get a batch of prompts for the queue")
+async def get_prompt_batch(
+    count: int = Query(10, ge=1, le=50),
+    exclude_ids: Optional[str] = Query(None, description="Comma-separated IDs to exclude"),
+    session: AsyncSession = Depends(get_session),
+) -> List[PromptRead]:
+    """Return `count` prompts for the frontend queue, excluding already-scored prompts."""
+    excluded = set()
+    if exclude_ids:
+        excluded = {int(x) for x in exclude_ids.split(",") if x.strip().isdigit()}
+
+    # IDs of prompts that already have at least one test result
+    scored_ids_q = select(TestResult.prompt_id).distinct()
+    scored_result = await session.execute(scored_ids_q)
+    scored_ids = {row[0] for row in scored_result.all()}
+    excluded = excluded | scored_ids
+
+    stmt = select(Prompt).where(Prompt.is_user_generated == False)
+    if excluded:
+        stmt = stmt.where(Prompt.id.notin_(excluded))
+    stmt = stmt.order_by(Prompt.used_count, func.random()).limit(count)
+
+    result = await session.execute(stmt)
+    prompts = result.scalars().all()
+    return [PromptRead.model_validate(p) for p in prompts]
 
 
 @router.get("/random", response_model=PromptRead, summary="Get a random prompt")
