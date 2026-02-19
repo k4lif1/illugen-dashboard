@@ -142,7 +142,7 @@ Detect the user's intent from their prompt:
 - Think like a record — what instruments would naturally play together on this track?
 
 ### STYLE ARRAYS
-- **positive_global_styles**: Mood, key, BPM (e.g. "90 bpm"), and the instrument(s). Always include the BPM tag. Include "instrumental" ONLY when no vocals are requested. MUST include ALL instrument tags. Do NOT use genre names — use descriptive adjectives and sonic qualities instead. MAX 10 tags (fewer is fine — only use tags that add value).
+- **positive_global_styles**: Genre (if melodic/harmonic — see GENRE NAMES POLICY), mood, key, BPM (e.g. "90 bpm"), and the instrument(s). Always include the BPM tag. Include "instrumental" ONLY when no vocals are requested. MUST include ALL instrument tags. MAX 10 tags (fewer is fine — only use tags that add value).
 - **negative_global_styles**: Exclude what does NOT belong. MAX 10 tags (fewer is fine).
 - **positive_local_styles**: MUST include the SAME instrument tag(s) that appear in positive_global_styles — instruments must be present in BOTH arrays. Then add playing style, sonic qualities, and effects. MAX 10 tags per section (fewer is fine).
 - **negative_local_styles**: Exclude unwanted elements. MUST mirror key exclusions from negative_global_styles (especially "drums", "percussion", "vocals") to reinforce at both levels. MAX 10 tags per section (fewer is fine).
@@ -151,7 +151,7 @@ Detect the user's intent from their prompt:
 - Do NOT include drums/percussion UNLESS the user EXPLICITLY mentions: drums, percussion, hi-hats, kicks, snares, drum machine, beat, drum kit, breakbeat, or clearly drum-related terms.
 - When drums are NOT mentioned: Add "drums", "percussion", "kick", "snare", "hi-hat", "cymbals" to BOTH negative_global_styles AND negative_local_styles for every section. Listing specific drum elements is critical — broad tags alone are not enough, the model tends to sneak in individual drum hits unless each is explicitly excluded.
 - When drums ARE mentioned: Include drum-specific styles in positive, exclude melodic/harmonic instruments in negative.
-- **NO GENRE NAMES**: NEVER use genre names in any style array (positive or negative, global or local). Genre names (e.g. "jazz", "trap", "soul", "flamenco", "hip-hop", "neo-soul", "drill", "EDM", "classical") are too broad and cause unpredictable steering. Instead, decompose the genre into its defining qualities — instruments, harmonic language, rhythmic feel, mood, texture, era. For example: "jazz" → "swung rhythm", "7th chords", "warm", "smoky"; "soul" → "warm", "vintage", "soulful", "groovy"; "trap" → "dark", "aggressive", "heavy low-end"; "flamenco" → "Spanish", "Phrygian mode", "passionate".
+- **GENRE NAMES POLICY**: Melodic/harmonic genres are OK to use as style tags: "soul", "jazz", "funk", "R&B", "blues", "bossa nova", "reggae", "flamenco", "classical", "neo-soul". These describe a tonal/harmonic language the model understands well. However, NEVER use drum-defined genres as style tags: "trap", "drill", "drum and bass", "jungle", "footwork", "breakbeat", "EDM", "dubstep", "hip-hop", "boom bap". These genres are defined by their drum patterns and will steer the model toward adding drums even when excluded. Instead, decompose drum-defined genres into their non-drum qualities: "trap" → "dark", "aggressive", "heavy low-end"; "drill" → "dark", "menacing", "sliding bass"; "hip-hop" → "swung", "urban", "head-nod groove".
 
 ### VOCALS POLICY
 - Do NOT include vocals/singing UNLESS the user EXPLICITLY mentions: vocals, singing, voice, rapper, singer, a cappella, opera, soprano, tenor, baritone, alto, or clearly vocal-related terms.
@@ -178,7 +178,7 @@ Detect the user's intent from their prompt:
 ### STYLE FORMAT — SHORT TAGS ONLY
 - Every style entry must be a SHORT TAG: 1-4 words max, like tags on Splice or Loopcloud.
 - GOOD tags: "dark", "sub bass", "tape saturation", "808 glide", "Rhodes chords", "7th voicings", "staccato rhythm", "analog distortion", "warm", "swung rhythm"
-- BAD (genre names): "jazz", "trap", "soul", "hip-hop", "neo-soul", "EDM", "flamenco"
+- BAD (drum-defined genres): "trap", "drill", "hip-hop", "boom bap", "EDM", "dubstep", "drum and bass"
 - BAD (too long): "warm analog sub bass with tape saturation and slow attack", "minimal processing aside from sub saturation"
 - English only. Do NOT reference specific artists, bands, or copyrighted material.
 
@@ -201,7 +201,7 @@ Never fill styles with ONLY production/texture tags — the model needs to know 
 
 ### Example 1: Bass stem — 4 bars (1 section, no vocals)
 Input: prompt="solo 808 bass, dark trap", bpm=140, bars=4, key="F# minor", duration_ms=6857
-NOTE: "trap" is a genre — decompose into qualities: dark, aggressive, heavy low-end.
+NOTE: "trap" is a drum-defined genre — decompose into non-drum qualities: dark, aggressive, heavy low-end.
 {
   "chosen_bpm": 140,
   "chosen_key": "F# minor",
@@ -218,13 +218,12 @@ NOTE: "trap" is a genre — decompose into qualities: dark, aggressive, heavy lo
   ]
 }
 
-### Example 2: Jazzy sample (SAMPLE mode — multi-instrument, no vocals) — 8 bars
+### Example 2: Jazz sample (SAMPLE mode — multi-instrument, no vocals) — 8 bars
 Input: prompt="jazzy J Dilla style sample loop", bpm=88, bars=8, key="auto", duration_ms=21818
-NOTE: "jazz" is a genre — decompose into qualities: swung rhythm, 7th chords, warm, smoky.
 {
   "chosen_bpm": 88,
   "chosen_key": "D minor",
-  "positive_global_styles": ["Rhodes piano", "vibraphone", "upright bass", "swung groove", "warm", "88 bpm", "D minor", "instrumental", "seamless loop"],
+  "positive_global_styles": ["jazz", "Rhodes piano", "vibraphone", "upright bass", "88 bpm", "D minor", "instrumental", "seamless loop"],
   "negative_global_styles": ["drums", "percussion", "kick", "snare", "hi-hat", "cymbals", "vocals", "electronic synths", "metal guitar"],
   "sections": [
     {
@@ -246,7 +245,7 @@ NOTE: "jazz" is a genre — decompose into qualities: swung rhythm, 7th chords, 
 
 ### Example 3: Drum stem — explicit drums, no vocals
 Input: prompt="punchy boom bap drums, swing feel", bpm=92, bars=4, key="none", duration_ms=10435
-NOTE: "boom bap" and "hip-hop" are genres — decompose into qualities: punchy, swung, vinyl-textured, compressed.
+NOTE: "boom bap" and "hip-hop" are drum-defined genres — decompose into non-drum qualities: punchy, swung, vinyl-textured.
 {
   "chosen_bpm": 92,
   "chosen_key": null,
@@ -265,11 +264,10 @@ NOTE: "boom bap" and "hip-hop" are genres — decompose into qualities: punchy, 
 
 ### Example 4: Vocals explicitly requested — string quartet with opera vocals
 Input: prompt="string quartet for flamenco dance with opera vocals in Italian", bpm=90, bars=8, key="A minor", duration_ms=21333
-NOTE: "flamenco" and "classical" are genres — decompose into qualities: Spanish, Phrygian, passionate, dance tempo.
 {
   "chosen_bpm": 90,
   "chosen_key": "A minor",
-  "positive_global_styles": ["string quartet", "opera vocals", "Spanish", "passionate", "A minor", "90 bpm", "seamless loop"],
+  "positive_global_styles": ["string quartet", "flamenco", "classical", "opera vocals", "A minor", "90 bpm", "seamless loop"],
   "negative_global_styles": ["drums", "percussion", "kick", "snare", "hi-hat", "cymbals", "electric instruments", "synths", "pop production"],
   "sections": [
     {
@@ -295,13 +293,12 @@ NOTE: "flamenco" and "classical" are genres — decompose into qualities: Spanis
   ]
 }
 
-### Example 5: Soulful sample (SAMPLE mode — multi-instrument, auto BPM/key, no vocals)
+### Example 5: Soul sample (SAMPLE mode — multi-instrument, auto BPM/key, no vocals)
 Input: prompt="soul 70s sample jazzy chopped", bpm="auto", bars=4, key="auto", duration_ms=null
-NOTE: "soul" and "jazz" are genres — decompose into qualities: warm, vintage, soulful, groovy, swung, 7th chords.
 {
   "chosen_bpm": 82,
   "chosen_key": "Eb major",
-  "positive_global_styles": ["Rhodes piano", "Fender bass", "soul guitar", "warm", "vintage", "82 bpm", "Eb major", "instrumental", "seamless loop"],
+  "positive_global_styles": ["soul", "jazz", "Rhodes piano", "Fender bass", "soul guitar", "82 bpm", "Eb major", "instrumental", "seamless loop"],
   "negative_global_styles": ["drums", "percussion", "kick", "snare", "hi-hat", "cymbals", "vocals", "electronic synths", "metal"],
   "sections": [
     {

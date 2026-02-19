@@ -1,163 +1,131 @@
-# DrumGen Scorer
+# Illugen Dashboard
 
-A comprehensive testing system for evaluating DrumGen AI model quality and LLM accuracy.
+A tool for generating and scoring music loops using AI. It uses OpenAI to create composition plans and ElevenLabs to generate audio.
 
-## Features
+## Prerequisites
 
-- **Testing Interface**: Load prompts from database and test against DrumGen API
-- **Analytics Dashboard**: View overall scores, performance by drum type, and difficulty levels
-- **Prompt Database Manager**: Search, filter, and manage test prompts
-- **Free Text Mode**: Optional mode for testing with custom prompts
+You need these installed on your computer before starting:
 
-## Design
+- **Python 3.10+** — [Download here](https://www.python.org/downloads/)
+- **Node.js 18+** — [Download here](https://nodejs.org/)
+- **Git** — [Download here](https://git-scm.com/downloads)
 
-The interface matches the DrumGen website theme with:
-- Dark gradient backgrounds (#0d1016, #161a23)
-- Cyan (#63d4ff) and purple (#c79bff) accent colors
-- Inter font family
-- Modern card-based layout with gradient overlays
+To check if you already have them, open a terminal and run:
 
-## Setup
-
-### Backend (FastAPI + SQLite)
-
-```bash
-cd backend
-python3 -m venv .venv
-source .venv/bin/activate  # On Windows: .venv\Scripts\activate
-pip install -r requirements.txt
+```
+python3 --version
+node --version
+git --version
 ```
 
-### Frontend (React + Vite)
+If each one prints a version number, you're good.
 
-```bash
+## Step-by-Step Setup
+
+### 1. Clone the repository
+
+Open a terminal and run:
+
+```
+git clone https://github.com/k4lif1/illugen-dashboard.git
+cd illugen-dashboard
+```
+
+### 2. Add the environment file
+
+The `.env` file contains the API keys needed to run the app. **It was sent to you via Teams.**
+
+1. Find the `.env` file you received on Teams
+2. Copy it into the `illugen-dashboard` folder (the root of the project — the same folder that has this `README.md` in it)
+
+If you open the `.env` file it should have lines like:
+
+```
+samplemakerOpenAiApiKey=sk-...
+samplemakerElevenLabsApiKey=xi-...
+```
+
+**Do not share this file or commit it to git.**
+
+### 3. Install backend (Python) dependencies
+
+From the project root folder, run:
+
+```
+pip install -r backend/requirements.txt
+```
+
+If `pip` doesn't work, try `pip3` instead:
+
+```
+pip3 install -r backend/requirements.txt
+```
+
+### 4. Install frontend (Node.js) dependencies
+
+```
 cd frontend
 npm install
+cd ..
 ```
 
-## Running the Application
+### 5. Start the backend server
 
-### Option 1: Desktop Shortcut (macOS)
-
-Double-click the **DrumGenServers** icon on your Desktop. This will:
-- Start both backend and frontend servers
-- Automatically open Chrome to http://localhost:5173
-- Keep servers running until you close the terminal
-
-### Option 2: Using Startup Scripts (Recommended)
-
-**Start both servers (always runs on main branch):**
-```bash
-./scripts/start_servers.sh
+```
+python3 -m uvicorn backend.main:app --port 8000
 ```
 
-**Start backend only:**
-```bash
-./scripts/start_backend.sh
+You should see output like:
+
+```
+INFO:     Uvicorn running on http://127.0.0.1:8000
 ```
 
-**Start frontend only:**
-```bash
-./scripts/start_frontend.sh
+**Leave this terminal window open** — the backend needs to keep running.
+
+### 6. Start the frontend (in a new terminal)
+
+Open a **second terminal window**, navigate to the project folder, then run:
+
+```
+cd illugen-dashboard/frontend
+npm run dev
 ```
 
-**Note:** These scripts automatically switch to the `main` branch before starting, ensuring the server always runs production code even if you're on the `dev` branch in your editor.
+You should see output like:
 
-### Option 3: Manual Start
+```
+VITE v5.x.x  ready in Xms
 
-**Backend:**
-```bash
-cd backend
-source ../.venv/bin/activate
-uvicorn backend.main:app --reload --port 8000
+  ➜  Local:   http://localhost:5173/
 ```
 
-**Frontend:**
-```bash
-cd frontend
-npm run dev -- --host --port 5173
+### 7. Open the app
+
+Open your browser and go to:
+
+```
+http://localhost:5173
 ```
 
-Then open http://localhost:5173 in your browser.
+You should see the Illugen Dashboard.
 
-## API Endpoints
+## Daily Usage
 
-### Backend (http://127.0.0.1:8000)
+Every time you want to use the app, you need to start both servers:
 
-- `GET /api/health` - Health check
-- `GET /api/prompts` - List prompts (with filters)
-- `POST /api/prompts/generate` - Generate new prompts
-- `DELETE /api/prompts/{id}` - Delete a prompt
-- `POST /api/test/send-prompt` - Send prompt to DrumGen and get JSON + audio
-- `POST /api/results/score` - Submit test scores
-- `GET /api/results/dashboard` - Get analytics data
+1. **Terminal 1** (backend): from the project folder, run `python3 -m uvicorn backend.main:app --port 8000`
+2. **Terminal 2** (frontend): from the project folder, run `cd frontend && npm run dev`
+3. **Browser**: go to `http://localhost:5173`
 
-## Database
+To stop the servers, press `Ctrl+C` in each terminal window.
 
-SQLite database located at `backend/drumgen.db`
+## Troubleshooting
 
-### Tables
-
-**prompts**
-- id, text, difficulty (1-10), category, created_at, used_count, expected_parameters
-
-**test_results**
-- id, prompt_id, audio_quality_score (1-10), llm_accuracy_score (1-10), generated_json, audio_id, tested_at, notes
-
-## Testing Workflow
-
-1. Navigate to **Testing** page
-2. System loads a random prompt from database
-3. Review the prompt and click "Send to DrumGen"
-4. System sends prompt to DrumGen API, gets LLM JSON and audio
-5. Review the generated JSON and play the audio
-6. Score both Audio Quality and LLM Accuracy (1-10)
-7. Click "Submit Score & Next Prompt" to save and load next prompt
-
-### Free Text Mode
-
-Toggle to **Free Text Mode** to test custom prompts not in the database.
-
-## Technology Stack
-
-- **Backend**: Python 3.11, FastAPI, SQLAlchemy, aiosqlite, httpx
-- **Frontend**: React 18, Vite, React Router
-- **Database**: SQLite
-- **Prompt Generation**: Template-based system (no external AI)
-
-## DrumGen Integration
-
-The system integrates with the internal Waves DrumGen demo site:
-- `POST /process_text` - LLM prompt processing
-- `POST /generate` - Audio generation
-- `GET /audio/{audio_id}` - Download WAV file
-
-Note: SSL verification is disabled for the internal Waves server.
-
-## Development
-
-- Backend uses async SQLAlchemy for database operations
-- Frontend uses modern React hooks and functional components
-- All styling matches DrumGen website theme via `theme.css`
-- CORS enabled for local development
-
-### DEV Badge
-
-When working on the `dev` branch, a red "DEV" badge appears next to the "DrumGen Scorer" title in the header. This badge:
-- Automatically appears when you checkout the `dev` branch
-- Automatically disappears when you checkout the `main` branch
-- Is automatically removed before committing to `main` (via git hooks)
-- Cannot be pushed to `main` (pre-push hook protection)
-
-**Important:** The server startup scripts (`scripts/start_*.sh`) always run on the `main` branch, ensuring production code is served even when developing on `dev`.
-
-## Backup & Persistence
-
-- SQLite database persists all data across server restarts
-- Database file: `backend/drumgen.db`
-- Backups folder: `backups/` (for manual backups)
-
-## License
-
-Internal Waves project
-
+| Problem | Solution |
+|---------|----------|
+| `command not found: python3` | Install Python from the link above |
+| `command not found: node` or `npm` | Install Node.js from the link above |
+| `Missing samplemakerOpenAiApiKey` | Make sure the `.env` file is in the project root folder |
+| Backend won't start | Check that port 8000 isn't already in use — try closing other terminals first |
+| Frontend shows connection errors | Make sure the backend is running in another terminal |

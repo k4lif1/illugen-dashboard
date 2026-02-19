@@ -79,9 +79,10 @@ async def submit_score(
 
     # Calculate generation score
     audio_score = payload.audio_quality_score
+    llm_score = payload.llm_accuracy_score
     gen_score = None
     if prompt and audio_score:
-        gen_score = round(calculate_generation_score(prompt.difficulty, audio_score))
+        gen_score = round(calculate_generation_score(prompt.difficulty, audio_score, llm_score or 10))
     
     result = TestResult(
         prompt_id=prompt_id,
@@ -162,7 +163,8 @@ async def dashboard(
             # Fallback: calculate if not stored (for old records)
             gen_score = calculate_generation_score(
                 prompt.difficulty,
-                test.audio_quality_score
+                test.audio_quality_score,
+                test.llm_accuracy_score or 10
             )
             generation_scores.append(gen_score)
             audio_scores.append(test.audio_quality_score)
@@ -193,7 +195,8 @@ async def dashboard(
             # Fallback for old records
             gen_score = calculate_generation_score(
                 prompt.difficulty,
-                test.audio_quality_score
+                test.audio_quality_score,
+                test.llm_accuracy_score or 10
             )
             by_version[version]["generation_scores"].append(gen_score)
             by_version[version]["audio_scores"].append(test.audio_quality_score)
@@ -261,7 +264,7 @@ async def dashboard(
         if test.generation_score is not None:
             drum_type_dist[drum_key]["generation_scores"].append(test.generation_score)
         elif test.audio_quality_score is not None:
-            gen_score = calculate_generation_score(prompt.difficulty, test.audio_quality_score)
+            gen_score = calculate_generation_score(prompt.difficulty, test.audio_quality_score, test.llm_accuracy_score or 10)
             drum_type_dist[drum_key]["generation_scores"].append(gen_score)
 
     # Calculate average generation score for each drum type and clean up
@@ -442,7 +445,7 @@ async def export_data(
                     audio_scores.append(test.audio_quality_score)
             elif test.audio_quality_score is not None:
                 # Fallback for old records
-                gen_score = calculate_generation_score(prompt.difficulty, test.audio_quality_score)
+                gen_score = calculate_generation_score(prompt.difficulty, test.audio_quality_score, test.llm_accuracy_score or 10)
                 generation_scores.append(gen_score)
                 audio_scores.append(test.audio_quality_score)
             # Always include LLM score
@@ -462,7 +465,7 @@ async def export_data(
             if test.generation_score is not None:
                 gen_score = test.generation_score
             elif test.audio_quality_score is not None:
-                gen_score = calculate_generation_score(difficulty, test.audio_quality_score)
+                gen_score = calculate_generation_score(difficulty, test.audio_quality_score, test.llm_accuracy_score or 10)
             else:
                 gen_score = None  # N/A case
             

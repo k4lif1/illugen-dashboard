@@ -5,28 +5,27 @@ from typing import Dict, Any, List
 import json
 
 
-def calculate_generation_score(difficulty: int, audio_score: int) -> float:
+def calculate_generation_score(difficulty: int, audio_score: int, llm_score: int = 10) -> float:
     """
-    Calculate weighted generation score based on difficulty and audio quality.
-    
-    Formula: ((difficulty * 0.3) + (audio_score * 0.7)) * 10
-    
-    Where:
-    - difficulty ranges from 1-10 (normalized to 0-1 by dividing by 10)
-    - audio_score is the audio_quality_score (1-10), normalized to 0-1
-    - Difficult prompts contribute more weight to the final score
-    - Multiplied by 10 to get a 0-100 scale
-    
-    Examples:
-    - difficulty=1, audio=10: (0.1*0.3 + 1.0*0.7) * 10 = 73
-    - difficulty=10, audio=5: (1.0*0.3 + 0.5*0.7) * 10 = 65
-    - difficulty=10, audio=10: (1.0*0.3 + 1.0*0.7) * 10 = 100
+    Calculate generation score out of 100.
+
+    Base = average of audio and LLM scores, scaled to 100.
+    Difficulty discount = up to 5 points off for hardest prompts.
+
+    Formula: base - difficulty_discount
+      base = ((audio_score + llm_score) / 20) * 100
+      difficulty_discount = (difficulty - 1) * 0.55  (0 at diff=1, ~5 at diff=10)
+
+    Examples (llm=10):
+    - difficulty=1,  audio=10, llm=10: 100 - 0.0 = 100
+    - difficulty=5,  audio=10, llm=10: 100 - 2.2 = 97.8
+    - difficulty=10, audio=10, llm=10: 100 - 5.0 = 95
+    - difficulty=1,  audio=7,  llm=8:  75  - 0.0 = 75
+    - difficulty=10, audio=7,  llm=8:  75  - 5.0 = 70
     """
-    normalized_difficulty = difficulty / 10.0
-    normalized_audio = audio_score / 10.0
-    
-    weighted = (normalized_difficulty * 0.3) + (normalized_audio * 0.7)
-    return weighted * 100
+    base = ((audio_score + llm_score) / 20.0) * 100
+    difficulty_discount = (difficulty - 1) * 0.55
+    return max(0, base - difficulty_discount)
 
 
 async def compute_dashboard_analytics(session: AsyncSession) -> Dict[str, Any]:

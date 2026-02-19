@@ -394,10 +394,10 @@ export default function DashboardPage({ setOverlayLoading }) {
                     Generation Score Formula
                   </div>
                   <div style={{ fontFamily: 'monospace', background: 'var(--primary-bg)', padding: '8px', borderRadius: '6px', marginBottom: '8px' }}>
-                    ((difficulty × 0.3) + (audio × 0.7)) × 10
+                    ((audio + llm) / 20) × 100 − (difficulty − 1) × 0.55
                   </div>
                   <div style={{ color: 'var(--text-secondary)' }}>
-                    Audio-only, weighted by difficulty. Easy prompts with high scores count less than difficult prompts with average scores. Range: 0-100.
+                    Average of audio and LLM scores scaled to 100, with a small discount for higher difficulty (up to ~5 points off). Range: 0-100.
                   </div>
                 </div>
               )}
